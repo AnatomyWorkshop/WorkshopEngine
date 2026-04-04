@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math/rand"
 
 	"gorm.io/gorm"
 	dbmodels "mvu-backend/internal/core/db"
@@ -13,6 +14,7 @@ import (
 	"mvu-backend/internal/engine/pipeline"
 	"mvu-backend/internal/engine/processor"
 	"mvu-backend/internal/engine/prompt_ir"
+	"mvu-backend/internal/engine/scheduled"
 	"mvu-backend/internal/engine/session"
 	"mvu-backend/internal/engine/tools"
 	"mvu-backend/internal/engine/variable"
@@ -61,6 +63,11 @@ type TurnResponse struct {
 	VN        *parser.VNDirectives `json:"vn,omitempty"`
 	ParseMode string               `json:"parse_mode"` // 调试：用哪种解析策略
 	TokenUsed int                  `json:"token_used"`
+
+	// ScheduledInput 非空时，表示本回合结束后有一条自动触发规则命中。
+	// 前端应以此文本为 user_input 再次调用 PlayTurn，完成 NPC 自主回合。
+	// 规则来源：GameTemplate.Config.scheduled_turns（variable_threshold 模式）。
+	ScheduledInput string `json:"scheduled_input,omitempty"`
 }
 
 // GameEngine 完整游戏引擎（依赖注入）
@@ -143,9 +150,10 @@ func (e *GameEngine) PlayTurn(ctx context.Context, req TurnRequest) (*TurnRespon
 
 	// 解析模板 Config JSONB（memory_label / fallback_options / enabled_tools 等可选字段）
 	var tmplCfg struct {
-		MemoryLabel     string   `json:"memory_label"`     // 记忆注入标签前缀
-		FallbackOptions []string `json:"fallback_options"` // parser fallback 默认选项
-		EnabledTools    []string `json:"enabled_tools"`    // 启用的工具名列表（空=不启用工具调用）
+		MemoryLabel     string                   `json:"memory_label"`     // 记忆注入标签前缀
+		FallbackOptions []string                 `json:"fallback_options"` // parser fallback 默认选项
+		EnabledTools    []string                 `json:"enabled_tools"`    // 启用的工具名列表（空=不启用工具调用）
+		ScheduledTurns  []scheduled.TriggerRule  `json:"scheduled_turns"`  // 自动回合触发规则
 	}
 	_ = json.Unmarshal(template.Config, &tmplCfg)
 
@@ -382,26 +390,43 @@ func (e *GameEngine) PlayTurn(ctx context.Context, req TurnRequest) (*TurnRespon
 		return nil, fmt.Errorf("commit turn: %w", err)
 	}
 
-	// ── 14. 异步任务（不阻塞响应） ─────────────────────────────
+	// ── 14. 同步递增楼层计数（ScheduledTurn 冷却检查依赖最新值）──────
+	count, _ := e.sessions.IncrFloorCount(req.SessionID)
+
+	// ── 15. 异步任务（不阻塞响应） ─────────────────────────────
 	go func() {
 		if parsed.Summary != "" {
 			_ = e.memStore.SaveFromParser(req.SessionID, parsed.Summary, 0)
 		}
-		count, _ := e.sessions.IncrFloorCount(req.SessionID)
 		if e.memoryTriggerRounds > 0 && count%e.memoryTriggerRounds == 0 {
 			e.triggerMemoryConsolidation(req.SessionID, history, count)
 		}
 	}()
 
+	// ── 16. ScheduledTurn 触发检查（后置，基于本回合最终变量）────
+	// 若命中规则，冷却记录持久化至 session.variables，响应携带 scheduled_input。
+	// 前端收到非空 scheduled_input 后，再次调用 PlayTurn 完成 NPC 自主回合。
+	var scheduledInput string
+	if len(tmplCfg.ScheduledTurns) > 0 {
+		currentVars := sb.Flatten()
+		if rule := scheduled.Evaluate(tmplCfg.ScheduledTurns, currentVars, count, rand.Float64()); rule != nil {
+			scheduledInput = rule.UserInput
+			_ = e.sessions.PatchSessionVariables(req.SessionID, map[string]any{
+				scheduled.CooldownKey(rule.ID): float64(count),
+			})
+		}
+	}
+
 	return &TurnResponse{
-		FloorID:   floorID,
-		PageID:    pageID,
-		Narrative: parsed.Narrative,
-		Options:   parsed.Options,
-		Variables: sb.Flatten(),
-		VN:        parsed.VN,
-		ParseMode: parsed.ParseMode,
-		TokenUsed: llmResp.Usage.TotalTokens,
+		FloorID:        floorID,
+		PageID:         pageID,
+		Narrative:      parsed.Narrative,
+		Options:        parsed.Options,
+		Variables:      sb.Flatten(),
+		VN:             parsed.VN,
+		ParseMode:      parsed.ParseMode,
+		TokenUsed:      llmResp.Usage.TotalTokens,
+		ScheduledInput: scheduledInput,
 	}, nil
 }
 

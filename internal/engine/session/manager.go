@@ -182,6 +182,28 @@ func (m *Manager) promotePageVarsToSession(floorID string, pageVars map[string]a
 	return m.db.Model(&session).Update("variables", newVars).Error
 }
 
+// PatchSessionVariables 将 patch 中的键值合并写入 Session.Variables（不删除已有键）。
+// 用于在 PlayTurn 完成后写入 ScheduledTurn 冷却记录等额外状态，无需重建整个沙箱。
+func (m *Manager) PatchSessionVariables(sessionID string, patch map[string]any) error {
+	if len(patch) == 0 {
+		return nil
+	}
+	var session dbmodels.GameSession
+	if err := m.db.First(&session, "id = ?", sessionID).Error; err != nil {
+		return err
+	}
+	var vars map[string]any
+	_ = json.Unmarshal(session.Variables, &vars)
+	if vars == nil {
+		vars = map[string]any{}
+	}
+	for k, v := range patch {
+		vars[k] = v
+	}
+	newVars, _ := json.Marshal(vars)
+	return m.db.Model(&session).Update("variables", newVars).Error
+}
+
 // IncrFloorCount 更新回合计数（用于触发记忆摘要的阈值判断）
 func (m *Manager) IncrFloorCount(sessionID string) (int, error) {
 	var session dbmodels.GameSession

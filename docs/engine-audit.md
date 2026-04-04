@@ -388,6 +388,36 @@ TurnRequest
 - `llm/client.go`：新增 `ToolDefinition`/`ToolCall`/`ToolCallFunction` 类型；`Message` / `Options` / `Response` / `buildBody` / `doChat` / `mergeOpts` 全部扩展支持 function calling
 - `game_loop.go`：主链路替换为 Agentic Tool Loop（最多 5 轮）；`tmplCfg.enabled_tools` 控制按需注册；无工具时单次直通
 
+### ✅ 已完成（第九轮 — ScheduledTurn MVP）
+
+**ScheduledTurn（variable_threshold 模式）**
+- `internal/engine/scheduled/trigger.go`（新包）：
+  - `TriggerRule` 结构体：`id`、`mode`、`condition_var`、`threshold`、`probability`、`cooldown_floors`、`user_input`
+  - `Evaluate(rules, variables, currentFloor, rng) *TriggerRule`：逐条检查冷却 → 阈值 → 概率，返回第一条命中规则
+  - `GetFloat(vars, path)`：支持点分路径访问嵌套变量（`emotion.tension`、`npc.夜歌.trust` 等）
+  - `CooldownKey(ruleID)`：冷却记录写入变量沙箱，键名 `__sched.<id>.last_floor`，无额外表
+- `engine/session/manager.go`：新增 `PatchSessionVariables(sessionID, patch)` — 合并写入 session.variables，用于冷却记录持久化
+- `engine/api/game_loop.go`：
+  - `TurnResponse` 新增 `scheduled_input` 字段（`omitempty`）
+  - `tmplCfg` 新增 `scheduled_turns []scheduled.TriggerRule`（从 `GameTemplate.Config` JSON 解析）
+  - `IncrFloorCount` 提升为同步调用（步骤 14）；记忆整合仍异步（步骤 15）
+  - 步骤 16：`Evaluate` 检查规则，命中时写冷却、返回 `scheduled_input`
+- **零代码配置示例**（`GameTemplate.Config` 中直接写 JSON）：
+  ```json
+  "scheduled_turns": [
+    {
+      "id": "hostile_npc",
+      "mode": "variable_threshold",
+      "condition_var": "emotion.tension",
+      "threshold": 70,
+      "probability": 0.75,
+      "cooldown_floors": 3,
+      "user_input": "[SYSTEM: 紧张状态自主触发，请生成一条 NPC 敌对内容]"
+    }
+  ]
+  ```
+- **前端集成**：`TurnResponse.scheduled_input` 非空时，前端以此为 `user_input` 再次调用 PlayTurn
+
 ### ✅ 已完成（第八轮 — ResourceToolProvider）
 
 **ResourceToolProvider（12 个资源工具）**
@@ -409,7 +439,7 @@ TurnRequest
 
 | 功能 | 复杂度 | 价值 |
 |------|--------|------|
-| **ScheduledTurn（自主回合）** | 低-中 | 高 — 定时/压力驱动自动触发 PlayTurn（NPC 不等玩家就发帖）；参考 SocialSim 压力调度器 |
+| **ScheduledTurn 定时模式**（后台 goroutine + SSE 推送） | 中 | 高 — 玩家不操作时 NPC 自主发帖；MVP 已完成后置检查模式，定时模式依赖 SSE 架构 |
 | **MaterialLibrary + search_material 工具** | 中 | 高 — 预生成内容池；背景 NPC 零 LLM 成本；参考 SocialSim Materials 模块 |
 | **StreamTurn Agentic Loop** | 低 | 中 — StreamTurn 目前不支持工具调用循环；先非流式完成 tool rounds 再流式出最终结果 |
 | **MCP 协议接入** | 中 | 高 — Tools 层已建好，MCP 标准化接入社区工具生态 |
