@@ -410,7 +410,7 @@ func (e *GameEngine) PlayTurn(ctx context.Context, req TurnRequest) (*TurnRespon
 	if len(tmplCfg.ScheduledTurns) > 0 {
 		currentVars := sb.Flatten()
 		if rule := scheduled.Evaluate(tmplCfg.ScheduledTurns, currentVars, count, rand.Float64()); rule != nil {
-			scheduledInput = rule.UserInput
+			scheduledInput = rule.PickInput()
 			_ = e.sessions.PatchSessionVariables(req.SessionID, map[string]any{
 				scheduled.CooldownKey(rule.ID): float64(count),
 			})

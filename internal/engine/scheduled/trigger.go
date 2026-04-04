@@ -23,6 +23,7 @@ package scheduled
 
 import (
 	"encoding/json"
+	"math/rand"
 	"strings"
 )
 
@@ -50,8 +51,13 @@ type TriggerRule struct {
 	CooldownFloors int `json:"cooldown_floors"`
 
 	// UserInput 触发时注入给 PlayTurn 的用户输入文本。
-	// 通常以 "[SYSTEM: ...]" 格式，告知 LLM 这是自动触发的系统回合。
+	// 与 EventPool 互斥：若 EventPool 非空，则忽略此字段，从 EventPool 随机抽取。
 	UserInput string `json:"user_input"`
+
+	// EventPool 随机事件池（模拟刷新机制）。
+	// 非空时，每次触发从池中均匀随机抽取一条作为 user_input，实现世界事件的随机涌现。
+	// 适合"世界刷新"类场景：突发新闻、随机 NPC 发帖、季节事件等。
+	EventPool []string `json:"event_pool,omitempty"`
 }
 
 // CooldownKey 返回在变量沙箱中存储此规则冷却记录的键名。
@@ -103,6 +109,15 @@ func Evaluate(rules []TriggerRule, variables map[string]any, currentFloor int, r
 		return r
 	}
 	return nil
+}
+
+// PickInput 返回规则本次触发应使用的 user_input 文本。
+// 若 EventPool 非空，均匀随机抽取一条；否则返回 UserInput 字段。
+func (r *TriggerRule) PickInput() string {
+	if len(r.EventPool) > 0 {
+		return r.EventPool[rand.Intn(len(r.EventPool))]
+	}
+	return r.UserInput
 }
 
 // GetFloat 从（可能嵌套的）变量 map 中按点分路径读取数值。

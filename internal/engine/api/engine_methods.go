@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math/rand"
 
 	"gorm.io/gorm"
 	dbmodels "mvu-backend/internal/core/db"
@@ -11,8 +12,11 @@ import (
 	"mvu-backend/internal/core/tokenizer"
 	"mvu-backend/internal/engine/parser"
 	"mvu-backend/internal/engine/pipeline"
+	"mvu-backend/internal/engine/processor"
 	"mvu-backend/internal/engine/prompt_ir"
+	"mvu-backend/internal/engine/scheduled"
 	"mvu-backend/internal/engine/session"
+	"mvu-backend/internal/engine/tools"
 	"mvu-backend/internal/engine/variable"
 )
 
@@ -59,17 +63,40 @@ func (e *GameEngine) GetState(ctx context.Context, sessionID string) (*StateResp
 	}, nil
 }
 
-// StreamTurn 流式推进一回合，返回 token 和 error channel（供 SSE 路由消费）
-// 与 PlayTurn 对齐：加载 preset/worldbook/tmplCfg，完整 Pipeline + slot 解析。
-func (e *GameEngine) StreamTurn(ctx context.Context, req TurnRequest) (<-chan string, <-chan error) {
+// StreamMeta StreamTurn 流式结束后返回的回合元数据（通过 metaCh 发送一次）。
+// 前端通过 SSE "meta" 事件接收，结构与 TurnResponse 对齐。
+type StreamMeta struct {
+	FloorID        string               `json:"floor_id"`
+	PageID         string               `json:"page_id"`
+	Variables      map[string]any       `json:"variables"`
+	Options        []string             `json:"options"`
+	VN             *parser.VNDirectives `json:"vn,omitempty"`
+	ParseMode      string               `json:"parse_mode"`
+	TokenUsed      int                  `json:"token_used"`
+	ScheduledInput string               `json:"scheduled_input,omitempty"`
+}
+
+// StreamTurn 流式推进一回合。与 PlayTurn 完全对齐（regex / tools / agentic loop / ScheduledTurn）。
+//
+// 返回三个 channel：
+//   - tokenCh:  逐 token 推送（关闭表示最终 LLM 流结束）
+//   - metaCh:   流结束后推送一条 StreamMeta（变量快照 / options / scheduled_input 等）
+//   - errCh:    出错时推送并退出
+//
+// Agentic 工具循环：
+//   - 若游戏模板启用了工具，先以**非流式**方式完成所有工具调用轮次（最多 5 轮）
+//   - 所有工具调用解决后，对最终回复**流式**输出给前端
+func (e *GameEngine) StreamTurn(ctx context.Context, req TurnRequest) (<-chan string, <-chan StreamMeta, <-chan error) {
 	tokenCh := make(chan string, 64)
+	metaCh := make(chan StreamMeta, 1)
 	errCh := make(chan error, 1)
 
 	go func() {
 		defer close(tokenCh)
+		defer close(metaCh)
 		defer close(errCh)
 
-		// 1. 加载会话 + 模板
+		// ── 1. 加载会话 + 模板 ────────────────────────────────────
 		var sess dbmodels.GameSession
 		if err := e.db.First(&sess, "id = ?", req.SessionID).Error; err != nil {
 			errCh <- fmt.Errorf("session not found: %w", err)
@@ -81,34 +108,72 @@ func (e *GameEngine) StreamTurn(ctx context.Context, req TurnRequest) (<-chan st
 			return
 		}
 
-		// 2. 加载世界书 + Preset Entry（对齐 PlayTurn）
+		// ── 2. 加载世界书 / Preset / Regex（与 PlayTurn 完全一致）───
 		var wbEntries []dbmodels.WorldbookEntry
 		e.db.Where("game_id = ? AND enabled = true", sess.GameID).Find(&wbEntries)
 		var presetEntries []dbmodels.PresetEntry
 		e.db.Where("game_id = ? AND enabled = true", sess.GameID).
 			Order("injection_order ASC").Find(&presetEntries)
+		var dbRegexRules []dbmodels.RegexRule
+		e.db.Joins("JOIN regex_profiles ON regex_rules.profile_id = regex_profiles.id").
+			Where("regex_profiles.game_id = ? AND regex_profiles.enabled = true AND regex_rules.enabled = true", sess.GameID).
+			Order("regex_rules.order ASC").Find(&dbRegexRules)
 
-		// 3. 解析模板 Config JSONB
+		// ── 3. 解析模板 Config（与 PlayTurn 对齐，含 ScheduledTurns）─
 		var tmplCfg struct {
-			MemoryLabel     string   `json:"memory_label"`
-			FallbackOptions []string `json:"fallback_options"`
-			EnabledTools    []string `json:"enabled_tools"` // 注：StreamTurn 暂不支持 Agentic Loop；工具在此仅作记录
+			MemoryLabel     string                  `json:"memory_label"`
+			FallbackOptions []string                `json:"fallback_options"`
+			EnabledTools    []string                `json:"enabled_tools"`
+			ScheduledTurns  []scheduled.TriggerRule `json:"scheduled_turns"`
 		}
 		_ = json.Unmarshal(template.Config, &tmplCfg)
 
-		// 4. 变量沙箱
+		// ── 4. 变量沙箱 ───────────────────────────────────────────
 		var chatVars map[string]any
 		_ = json.Unmarshal(sess.Variables, &chatVars)
 		sb := variable.NewSandbox(nil, chatVars, nil, nil, nil)
 
-		// 5. 转换 WorldbookEntry / PresetEntry → IR
+		// ── 4b. 工具注册（与 PlayTurn 完全一致）─────────────────────
+		toolReg := tools.NewRegistry()
+		if len(tmplCfg.EnabledTools) > 0 {
+			enabled := make(map[string]struct{}, len(tmplCfg.EnabledTools))
+			for _, name := range tmplCfg.EnabledTools {
+				enabled[name] = struct{}{}
+			}
+			if _, ok := enabled["get_variable"]; ok {
+				toolReg.Register(tools.NewGetVariableTool(sb))
+			}
+			if _, ok := enabled["set_variable"]; ok {
+				toolReg.Register(tools.NewSetVariableTool(sb))
+			}
+			if _, ok := enabled["search_memory"]; ok {
+				toolReg.Register(tools.NewSearchMemoryTool(req.SessionID, e.memStore))
+			}
+			if _, ok := enabled["resource:*"]; ok {
+				for _, t := range tools.NewResourceToolProvider(e.db, sess.GameID, req.SessionID, e.memStore) {
+					toolReg.Register(t)
+				}
+			} else {
+				for _, t := range tools.NewResourceToolProvider(e.db, sess.GameID, req.SessionID, e.memStore) {
+					if _, ok := enabled[t.Name()]; ok {
+						toolReg.Register(t)
+					}
+				}
+			}
+		}
+
+		// ── 5. 转换 WorldbookEntry / PresetEntry / Regex → IR ─────
 		var wbIR []prompt_ir.WorldbookEntry
 		for _, entry := range wbEntries {
-			var keys []string
+			var keys, secondaryKeys []string
 			_ = json.Unmarshal(entry.Keys, &keys)
+			_ = json.Unmarshal(entry.SecondaryKeys, &secondaryKeys)
 			wbIR = append(wbIR, prompt_ir.WorldbookEntry{
-				ID: entry.ID, Keys: keys, Content: entry.Content,
-				Constant: entry.Constant, Priority: entry.Priority, Enabled: entry.Enabled,
+				ID: entry.ID, Keys: keys, SecondaryKeys: secondaryKeys,
+				SecondaryLogic: entry.SecondaryLogic, Content: entry.Content,
+				Constant: entry.Constant, Priority: entry.Priority,
+				ScanDepth: entry.ScanDepth, Position: entry.Position,
+				WholeWord: entry.WholeWord, Enabled: entry.Enabled,
 			})
 		}
 		var presetIR []prompt_ir.PresetEntry
@@ -120,16 +185,24 @@ func (e *GameEngine) StreamTurn(ctx context.Context, req TurnRequest) (<-chan st
 				IsSystemPrompt: pe.IsSystemPrompt,
 			})
 		}
+		var regexRules []prompt_ir.RegexRule
+		for _, r := range dbRegexRules {
+			regexRules = append(regexRules, prompt_ir.RegexRule{
+				Pattern: r.Pattern, Replacement: r.Replacement,
+				ApplyTo: r.ApplyTo, Enabled: r.Enabled,
+			})
+		}
 
-		// 6. 历史 + 当前输入
+		// ── 6. 历史 + 用户输入（先经 regex 预处理）────────────────
 		history, _ := e.sessions.GetHistory(req.SessionID, e.maxHistoryFloors)
+		userInput := processor.ApplyToUserInput(req.UserInput, regexRules)
 		var recentMsgs []prompt_ir.Message
 		for _, m := range history {
 			recentMsgs = append(recentMsgs, prompt_ir.Message{Role: m["role"], Content: m["content"]})
 		}
-		recentMsgs = append(recentMsgs, prompt_ir.Message{Role: "user", Content: req.UserInput})
+		recentMsgs = append(recentMsgs, prompt_ir.Message{Role: "user", Content: userInput})
 
-		// 7. 运行 Prompt Pipeline
+		// ── 7. 运行 Prompt Pipeline ────────────────────────────────
 		pipelineCtx := &prompt_ir.ContextData{
 			Mode: prompt_ir.ModeNative,
 			Config: prompt_ir.GameConfig{
@@ -139,6 +212,7 @@ func (e *GameEngine) StreamTurn(ctx context.Context, req TurnRequest) (<-chan st
 				MemorySummary:        sess.MemorySummary,
 				MemoryLabel:          tmplCfg.MemoryLabel,
 				FallbackOptions:      tmplCfg.FallbackOptions,
+				RegexRules:           regexRules,
 			},
 			Variables:      sb.Flatten(),
 			RecentMessages: recentMsgs,
@@ -151,7 +225,7 @@ func (e *GameEngine) StreamTurn(ctx context.Context, req TurnRequest) (<-chan st
 			return
 		}
 
-		// 8. 处理楼层/页面（Regen 复用当前楼层，否则创建新楼层）
+		// ── 8. 处理楼层/页面 ──────────────────────────────────────
 		var floorID, pageID string
 		if req.IsRegen {
 			var floor dbmodels.Floor
@@ -172,7 +246,7 @@ func (e *GameEngine) StreamTurn(ctx context.Context, req TurnRequest) (<-chan st
 			return
 		}
 
-		// 9. 解析 LLM Profile + 覆盖参数（对齐 PlayTurn 优先级链）
+		// ── 9. 解析 LLM Profile + 参数覆盖（与 PlayTurn 优先级链一致）─
 		client, llmOpts := e.resolveSlot(req.SessionID, sess.UserID, "narrator")
 		if req.Model != "" {
 			llmOpts.Model = req.Model
@@ -193,30 +267,58 @@ func (e *GameEngine) StreamTurn(ctx context.Context, req TurnRequest) (<-chan st
 			llmMsgs = append(llmMsgs, llm.Message{Role: m["role"], Content: m["content"]})
 		}
 
-		// 10. 流式 LLM 调用
+		// 注入工具定义
+		if defs := toolReg.ToLLMDefinitions(); len(defs) > 0 {
+			llmOpts.Tools = defs
+		}
+
+		// ── 10a. Agentic 工具循环（非流式，最多 5 轮）────────────────
+		// 先以非流式方式完成所有工具调用，再对最终回复做流式推送。
+		const maxToolIter = 5
+		var toolResp *llm.Response
+		for iter := 0; iter < maxToolIter; iter++ {
+			toolResp, err = client.Chat(ctx, llmMsgs, llmOpts)
+			if err != nil {
+				_ = e.sessions.FailTurn(floorID, err.Error())
+				errCh <- fmt.Errorf("llm tool round: %w", err)
+				return
+			}
+			if len(toolResp.ToolCalls) == 0 {
+				break // 无更多工具调用
+			}
+			llmMsgs = append(llmMsgs, llm.Message{
+				Role:      "assistant",
+				Content:   toolResp.Content,
+				ToolCalls: toolResp.ToolCalls,
+			})
+			for _, tc := range toolResp.ToolCalls {
+				result := toolReg.Execute(ctx, tc.Function.Name, json.RawMessage(tc.Function.Arguments))
+				llmMsgs = append(llmMsgs, llm.Message{
+					Role:       "tool",
+					Content:    result,
+					ToolCallID: tc.ID,
+					Name:       tc.Function.Name,
+				})
+			}
+		}
+		// 工具轮次完成后移除工具定义，防止最终流式调用再次触发工具
+		llmOpts.Tools = nil
+
+		// ── 10b. 流式输出最终 LLM 回复 ───────────────────────────
 		streamCh, streamErrCh := client.ChatStream(ctx, llmMsgs, llmOpts)
 
-		// 11. 转发 token，流结束后提交状态
 		var fullContent string
-		for {
+		var tokenUsed int
+		if toolResp != nil {
+			tokenUsed = toolResp.Usage.TotalTokens
+		}
+		streamDone := false
+		for !streamDone {
 			select {
 			case token, ok := <-streamCh:
 				if !ok {
-					// 流结束：解析 + 提交
-					parsed := parser.Parse(fullContent)
-					if len(parsed.Options) == 0 && len(tmplCfg.FallbackOptions) > 0 {
-						parsed.Options = tmplCfg.FallbackOptions
-					}
-					for k, v := range parsed.StatePatch {
-						sb.Set(k, v)
-					}
-					_ = e.sessions.CommitTurn(pageID, fullContent, sb.Flatten())
-					if parsed.Summary != "" {
-						go func() {
-							_ = e.memStore.SaveFromParser(req.SessionID, parsed.Summary, 0)
-						}()
-					}
-					return
+					streamDone = true
+					break
 				}
 				fullContent += token
 				select {
@@ -225,20 +327,77 @@ func (e *GameEngine) StreamTurn(ctx context.Context, req TurnRequest) (<-chan st
 					_ = e.sessions.FailTurn(floorID, "context cancelled")
 					return
 				}
-			case err := <-streamErrCh:
+			case err = <-streamErrCh:
 				if err != nil {
 					_ = e.sessions.FailTurn(floorID, err.Error())
 					errCh <- err
+					return
 				}
-				return
+				streamDone = true
 			case <-ctx.Done():
 				_ = e.sessions.FailTurn(floorID, "context cancelled")
 				return
 			}
 		}
+
+		// ── 11. 解析 AI 响应 + regex 后处理 ──────────────────────
+		parsed := parser.Parse(fullContent)
+		if len(regexRules) > 0 {
+			parsed.Narrative = processor.ApplyToAIOutput(parsed.Narrative, regexRules)
+		}
+		if len(parsed.Options) == 0 && len(tmplCfg.FallbackOptions) > 0 {
+			parsed.Options = tmplCfg.FallbackOptions
+		}
+
+		// ── 12. 更新变量沙箱 ──────────────────────────────────────
+		for k, v := range parsed.StatePatch {
+			sb.Set(k, v)
+		}
+
+		// ── 13. CommitTurn ────────────────────────────────────────
+		if err = e.sessions.CommitTurn(pageID, fullContent, sb.Flatten()); err != nil {
+			errCh <- fmt.Errorf("commit turn: %w", err)
+			return
+		}
+
+		// ── 14. 同步递增楼层计数 ───────────────────────────────────
+		count, _ := e.sessions.IncrFloorCount(req.SessionID)
+
+		// ── 15. 异步任务（记忆整合）────────────────────────────────
+		go func() {
+			if parsed.Summary != "" {
+				_ = e.memStore.SaveFromParser(req.SessionID, parsed.Summary, 0)
+			}
+			if e.memoryTriggerRounds > 0 && count%e.memoryTriggerRounds == 0 {
+				e.triggerMemoryConsolidation(req.SessionID, history, count)
+			}
+		}()
+
+		// ── 16. ScheduledTurn 触发检查 ────────────────────────────
+		var scheduledInput string
+		if len(tmplCfg.ScheduledTurns) > 0 {
+			if rule := scheduled.Evaluate(tmplCfg.ScheduledTurns, sb.Flatten(), count, rand.Float64()); rule != nil {
+				scheduledInput = rule.PickInput()
+				_ = e.sessions.PatchSessionVariables(req.SessionID, map[string]any{
+					scheduled.CooldownKey(rule.ID): float64(count),
+				})
+			}
+		}
+
+		// ── 17. 推送元数据 ────────────────────────────────────────
+		metaCh <- StreamMeta{
+			FloorID:        floorID,
+			PageID:         pageID,
+			Variables:      sb.Flatten(),
+			Options:        parsed.Options,
+			VN:             parsed.VN,
+			ParseMode:      parsed.ParseMode,
+			TokenUsed:      tokenUsed,
+			ScheduledInput: scheduledInput,
+		}
 	}()
 
-	return tokenCh, errCh
+	return tokenCh, metaCh, errCh
 }
 
 // ── Session CRUD ──────────────────────────────────────────────────────────────

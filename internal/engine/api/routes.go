@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"strconv"
@@ -80,15 +81,24 @@ func RegisterGameRoutes(rg *gin.RouterGroup, engine *GameEngine) {
 			return
 		}
 
-		tokenCh, errCh := engine.StreamTurn(c.Request.Context(), TurnRequest{
+		tokenCh, metaCh, errCh := engine.StreamTurn(c.Request.Context(), TurnRequest{
 			SessionID: c.Param("id"),
 			UserInput: userInput,
+			APIKey:    c.Query("api_key"),
+			BaseURL:   c.Query("base_url"),
+			Model:     c.Query("model"),
 		})
 
 		c.Stream(func(w io.Writer) bool {
 			select {
 			case token, ok := <-tokenCh:
 				if !ok {
+					// tokenCh 关闭：读取元数据并推送结束事件
+					if meta, ok2 := <-metaCh; ok2 {
+						if b, err := json.Marshal(meta); err == nil {
+							c.SSEvent("meta", string(b))
+						}
+					}
 					c.SSEvent("done", "")
 					return false
 				}
