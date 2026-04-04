@@ -407,3 +407,4 @@ TurnRequest
 
 能力边界分析见 [`docs/st-comparison.md`](st-comparison.md)。
 设计思路见 [`docs/prompt-block-design.md`](prompt-block-design.md)。
+SocialSim 集成分析见 [`docs/socialsim-analysis.md`](socialsim-analysis.md)。
