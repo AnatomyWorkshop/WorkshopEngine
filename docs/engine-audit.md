@@ -117,6 +117,9 @@ internal/
 | `MEMORY_MODEL` | 同 LLM_MODEL | 记忆整合使用的廉价模型 |
 | `MEMORY_MAX_TOKENS` | `512` | 记忆摘要最大输出 token |
 | `MEMORY_TOKEN_BUDGET` | `600` | 记忆注入 token 预算 |
+| `MEMORY_DEPRECATE_AFTER_DAYS` | `7` | summary 记忆超过 N 天后自动废弃（0 = 禁用） |
+| `MEMORY_PURGE_AFTER_DAYS` | `30` | deprecated 记忆超过 N 天后物理删除（0 = 禁用） |
+| `MEMORY_MAINTENANCE_INTERVAL_SEC` | `3600` | 维护扫描间隔（独立于整合轮询） |
 | `ADMIN_KEY` | 空=开发模式放行 | 服务端全局 API Key |
 | `ALLOW_ANONYMOUS` | `true` | 允许无 X-Account-ID 请求 |
 | `UPLOAD_DIR` | `./uploads` | 素材存储目录 |
@@ -291,7 +294,7 @@ TurnRequest
 | **Prompt Dry-Run** | 完整快照 + digest | ✅ `GET /sessions/:id/prompt-preview`（messages + est_tokens + block counts） | — |
 | **Worldbook 正则关键词** | `regex:` 前缀触发正则 | ✅ 已支持（`matchWorldbookKey`） | — |
 | **Memory 时间衰减** | 半衰期指数衰减 + minFactor | ✅ `StoreConfig.HalfLifeDays` + `MinDecayFactor` | — |
-| **Memory 维护策略（deprecate/purge）** | 完整 | ❌ 未实现 | 中期目标 |
+| **Memory 维护策略（deprecate/purge）** | 完整 | ✅ 全局维护 Worker（DeprecateAfterDays + PurgeAfterDays + MaintenanceInterval 独立定时器） | — |
 | **Worker 轮询参数（批次/租约/重试）** | 全部可配置 | ⚠️ 轮询间隔硬编码 | 近期 |
 | **多 Provider 注册表** | 支持 openai/anthropic/google/xai | ⚠️ 仅 openai-compatible | 近期 |
 | **Auth（JWT / API key 账户映射）** | 完整 | ⚠️ 仅 admin key + X-Account-ID | 中期 |
@@ -302,6 +305,13 @@ TurnRequest
 ---
 
 ## 扩充路线图
+
+### ✅ 已完成（第五轮 — Memory 维护策略）
+
+- `memory/store.go`：`DeprecateOldMemoriesGlobal(days)` + `PurgeDeprecatedMemoriesGlobal(days)` — 无 session_id 过滤，全量扫描，单条 SQL
+- `memory/worker.go`：`WorkerConfig` 新增 `DeprecateAfterDays`、`PurgeAfterDays`、`MaintenanceInterval`；`Run()` 增加独立 `maintenanceTicker`；新增 `runMaintenance()`
+- `config.go`：新增 `MEMORY_DEPRECATE_AFTER_DAYS`（默认 7）、`MEMORY_PURGE_AFTER_DAYS`（默认 30）、`MEMORY_MAINTENANCE_INTERVAL_SEC`（默认 3600）
+- `cmd/worker/main.go`：三个新字段透传至 `WorkerConfig`
 
 ### ✅ 已完成（第四轮 — Session/Memory/Floor 管理 API + StreamTurn 对齐）
 
@@ -348,7 +358,7 @@ TurnRequest
 
 ### ⚠️ 近期目标
 
-- Memory 维护策略（deprecate/purge policies 接入 Worker 轮询）
+（全部核心能力已对齐 TH）
 
 ### 📋 中期目标
 

@@ -85,6 +85,14 @@ type WorkerConfig struct {
 	MaxConcurrent int // MEMORY_WORKER_MAX_CONCURRENT, default 4
 	// Worker 会话处理租约有效期（秒），防止同批次重复处理
 	LeaseTTLSec int // MEMORY_WORKER_LEASE_TTL_SEC, default 120
+
+	// ── 维护策略（对应 TH MemoryMaintenancePolicy）─────────────────
+	// 将 N 天前的 summary 类记忆标记为 deprecated（0 = 禁用）
+	DeprecateAfterDays int // MEMORY_DEPRECATE_AFTER_DAYS, default 7
+	// 将 deprecated 且超过 N 天的记忆物理删除（0 = 禁用）
+	PurgeAfterDays int // MEMORY_PURGE_AFTER_DAYS, default 30
+	// 维护扫描间隔（秒），独立于整合轮询
+	MaintenanceIntervalSec int // MEMORY_MAINTENANCE_INTERVAL_SEC, default 3600
 }
 
 // Load 从环境变量加载配置。
@@ -126,6 +134,9 @@ func Load() (*Config, error) {
 			BatchSize:                envInt("MEMORY_WORKER_BATCH_SIZE", 20),
 			MaxConcurrent:            envInt("MEMORY_WORKER_MAX_CONCURRENT", 4),
 			LeaseTTLSec:              envInt("MEMORY_WORKER_LEASE_TTL_SEC", 120),
+			DeprecateAfterDays:       envInt("MEMORY_DEPRECATE_AFTER_DAYS", 7),
+			PurgeAfterDays:           envInt("MEMORY_PURGE_AFTER_DAYS", 30),
+			MaintenanceIntervalSec:   envInt("MEMORY_MAINTENANCE_INTERVAL_SEC", 3600),
 		},
 	}
 

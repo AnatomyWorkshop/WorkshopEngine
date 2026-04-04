@@ -26,8 +26,13 @@ type WorkerConfig struct {
 	TokenBudget    int           // 注入摘要时的 token 预算
 	BatchSize      int           // 每次扫描最多处理几个 session
 	MaxConcurrent  int           // 最大并发 LLM 调用数
-	PollInterval   time.Duration // 扫描间隔
+	PollInterval   time.Duration // 整合扫描间隔
 	LeaseTTL       time.Duration // 会话处理租约有效期（防双处理）
+
+	// ── 维护策略（对应 TH MemoryMaintenancePolicy）─────────────────
+	DeprecateAfterDays  int           // 超过 N 天的 summary 记忆自动废弃（0 = 禁用）
+	PurgeAfterDays      int           // deprecated 且超过 N 天的记忆物理删除（0 = 禁用）
+	MaintenanceInterval time.Duration // 维护扫描间隔（独立于整合轮询）
 }
 
 // defaults 填充 WorkerConfig 中的零值
@@ -52,6 +57,10 @@ func (c *WorkerConfig) defaults() {
 	}
 	if c.LeaseTTL <= 0 {
 		c.LeaseTTL = 2 * time.Minute
+	}
+	// 维护策略：零值 = 禁用，不覆盖（让调用方显式传 0 来关闭）
+	if c.MaintenanceInterval <= 0 {
+		c.MaintenanceInterval = time.Hour
 	}
 }
 
@@ -93,26 +102,52 @@ func NewWorker(
 
 // Run 启动 Worker 主循环，阻塞直到 ctx 取消。
 //
-// 启动时立即执行一次扫描，之后每 PollInterval 执行一次。
+// 启动时立即执行一次整合扫描；维护扫描按独立定时器运行。
 func (w *Worker) Run(ctx context.Context) {
-	log.Printf("[worker] started — trigger every %d rounds, poll %s, batch %d, max_concurrent %d",
-		w.cfg.TriggerRounds, w.cfg.PollInterval, w.cfg.BatchSize, w.cfg.MaxConcurrent)
+	log.Printf("[worker] started — trigger every %d rounds, poll %s, maintenance %s, batch %d, max_concurrent %d",
+		w.cfg.TriggerRounds, w.cfg.PollInterval, w.cfg.MaintenanceInterval,
+		w.cfg.BatchSize, w.cfg.MaxConcurrent)
 
-	// 启动时立即扫描一次
+	// 启动时立即整合扫描一次
 	w.processBatch(ctx)
 
-	ticker := time.NewTicker(w.cfg.PollInterval)
-	defer ticker.Stop()
+	consolidateTicker := time.NewTicker(w.cfg.PollInterval)
+	defer consolidateTicker.Stop()
+
+	maintenanceTicker := time.NewTicker(w.cfg.MaintenanceInterval)
+	defer maintenanceTicker.Stop()
 
 	for {
 		select {
-		case <-ticker.C:
+		case <-consolidateTicker.C:
 			w.processBatch(ctx)
+		case <-maintenanceTicker.C:
+			w.runMaintenance()
 		case <-ctx.Done():
 			log.Printf("[worker] shutting down, waiting for in-flight jobs…")
 			w.drainLeases()
 			log.Printf("[worker] stopped")
 			return
+		}
+	}
+}
+
+// runMaintenance 执行全局记忆维护：废弃过期摘要 + 物理删除长期废弃条目。
+func (w *Worker) runMaintenance() {
+	if w.cfg.DeprecateAfterDays > 0 {
+		n, err := w.memStore.DeprecateOldMemoriesGlobal(w.cfg.DeprecateAfterDays)
+		if err != nil {
+			log.Printf("[worker] maintenance deprecate: %v", err)
+		} else if n > 0 {
+			log.Printf("[worker] maintenance: deprecated %d summary memories (>%dd)", n, w.cfg.DeprecateAfterDays)
+		}
+	}
+	if w.cfg.PurgeAfterDays > 0 {
+		n, err := w.memStore.PurgeDeprecatedMemoriesGlobal(w.cfg.PurgeAfterDays)
+		if err != nil {
+			log.Printf("[worker] maintenance purge: %v", err)
+		} else if n > 0 {
+			log.Printf("[worker] maintenance: purged %d deprecated memories (>%dd)", n, w.cfg.PurgeAfterDays)
 		}
 	}
 }

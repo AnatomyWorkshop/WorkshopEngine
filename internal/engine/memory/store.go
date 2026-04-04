@@ -342,3 +342,30 @@ func (s *Store) FindSessionsNeedingConsolidation(triggerRounds, batchSize int) (
 	`, triggerRounds, triggerRounds, batchSize).Scan(&sessions).Error
 	return sessions, err
 }
+
+// ── 全局维护（对应 TH MemoryMaintenancePolicy）────────────────────────────────
+
+// DeprecateOldMemoriesGlobal 将所有 session 中超过 olderThanDays 天的 summary 记忆标记为 deprecated。
+// 对应 TH 的 MemoryMaintenancePolicy.deprecateAfterDays，由 Worker 定期调用。
+func (s *Store) DeprecateOldMemoriesGlobal(olderThanDays int) (int64, error) {
+	if olderThanDays <= 0 {
+		return 0, nil
+	}
+	cutoff := time.Now().AddDate(0, 0, -olderThanDays)
+	result := s.db.Model(&dbmodels.Memory{}).
+		Where("deprecated = false AND type = ? AND created_at < ?", dbmodels.MemorySummary, cutoff).
+		Update("deprecated", true)
+	return result.RowsAffected, result.Error
+}
+
+// PurgeDeprecatedMemoriesGlobal 物理删除所有 session 中 deprecated 且超过 olderThanDays 天的记忆。
+// 对应 TH 的 MemoryMaintenancePolicy.purgeAfterDays，由 Worker 定期调用。
+func (s *Store) PurgeDeprecatedMemoriesGlobal(olderThanDays int) (int64, error) {
+	if olderThanDays <= 0 {
+		return 0, nil
+	}
+	cutoff := time.Now().AddDate(0, 0, -olderThanDays)
+	result := s.db.Where("deprecated = true AND updated_at < ?", cutoff).
+		Delete(&dbmodels.Memory{})
+	return result.RowsAffected, result.Error
+}
