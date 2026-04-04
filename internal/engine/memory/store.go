@@ -10,6 +10,7 @@ import (
 
 	"gorm.io/gorm"
 	dbmodels "mvu-backend/internal/core/db"
+	"mvu-backend/internal/core/tokenizer"
 )
 
 // StoreConfig 记忆系统可配置参数（全部有默认值，零值均安全）。
@@ -123,17 +124,17 @@ func (s *Store) GetForInjection(sessionID string, tokenBudget int) (string, erro
 		return scored[i].score > scored[j].score
 	})
 
-	// 按 Token 预算（粗估：1 token ≈ 1.5 汉字）裁剪
-	maxChars := tokenBudget * 2
+	// 按 Token 预算裁剪（使用启发式 tokenizer，比字节估算更准确）
+	usedTokens := 0
 	var parts []string
-	used := 0
 	for _, sm := range scored {
 		content := sm.mem.Content
-		if used+len(content) > maxChars {
+		est := tokenizer.Estimate(content)
+		if usedTokens+est > tokenBudget {
 			break
 		}
 		parts = append(parts, content)
-		used += len(content) + 1
+		usedTokens += est + 1 // +1 for separator token
 	}
 
 	if len(parts) == 0 {

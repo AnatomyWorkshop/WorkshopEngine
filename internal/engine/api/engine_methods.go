@@ -4,11 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"unicode/utf8"
 
 	"gorm.io/gorm"
 	dbmodels "mvu-backend/internal/core/db"
 	"mvu-backend/internal/core/llm"
+	"mvu-backend/internal/core/tokenizer"
 	"mvu-backend/internal/engine/parser"
 	"mvu-backend/internal/engine/pipeline"
 	"mvu-backend/internal/engine/prompt_ir"
@@ -627,11 +627,8 @@ func (e *GameEngine) PromptPreview(ctx context.Context, sessionID, userInput str
 		return nil, fmt.Errorf("pipeline: %w", err)
 	}
 
-	// 粗估 token 数：UTF-8 字符数 / 2 (中英混合经验值)
-	var totalChars int
-	for _, m := range finalMessages {
-		totalChars += utf8.RuneCountInString(m["content"])
-	}
+	// 估算 token 数（使用启发式 tokenizer，BPE 兼容）
+	estTokens := tokenizer.EstimateMessages(finalMessages)
 
 	// 统计各类 block 数量
 	presetHits, wbHits, memUsed := 0, 0, false
@@ -648,7 +645,7 @@ func (e *GameEngine) PromptPreview(ctx context.Context, sessionID, userInput str
 
 	return &PromptPreviewResponse{
 		Messages:      finalMessages,
-		EstTokens:     totalChars / 2,
+		EstTokens:     estTokens,
 		BlockCount:    len(pCtx.Blocks),
 		PresetHits:    presetHits,
 		WorldbookHits: wbHits,
