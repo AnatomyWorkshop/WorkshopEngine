@@ -258,6 +258,243 @@ SocialSim 已验证了以下工具对社交类游戏的必要性，WE ResourceTo
 
 ---
 
+## AI 作为 Player 2：情绪驱动生成模型设计分析
+
+> 设想：设计一组**全局情绪值**，玩家行为或游戏数值映射到情绪值变化，
+> 情绪值达到阈值后触发 NPC 内容生成，生成结束后情绪值反向更新；
+> 前端负责阈值检测和随机因子，后端负责存储状态和驱动 LLM。
+
+---
+
+### 概念核心（与 SocialSim 压力调度器对比）
+
+| 维度 | SocialSim 压力调度器 | 情绪驱动模型（新设想） |
+|---|---|---|
+| **驱动量** | 单一标量"压力值" | 多维情绪向量（紧张度/好感度/热度…） |
+| **触发条件** | 压力 ≥ 阈值 | 情绪值跨阈 × 随机因子 |
+| **触发后** | 生成一批 NPC 帖子，压力归零 | 生成内容**同时**情绪值向新均衡收敛 |
+| **前端职责** | 仅渲染 | 阈值决策 + 随机数 + UI 风格映射 |
+| **Prompt 影响** | 无直接影响（靠 Tier 路由） | 情绪值注入 Prompt，LLM 产出风格随情绪变化 |
+
+情绪驱动模型的核心优势：**NPC 的行为风格会随世界氛围连续演变**，而非只有"有/无内容生成"的二值响应。
+
+---
+
+### 当前 WE 已经支持的部分
+
+**情绪值存储（变量沙箱）：完整支持**
+```json
+// 初始化会话变量
+{
+  "emotion": {
+    "tension":    40,
+    "affinity":   60,
+    "viral_heat": 20
+  },
+  "npc_mood": {
+    "夜歌":   { "trust": 55, "excitement": 30 },
+    "破晓新闻": { "aggression": 20 }
+  }
+}
+```
+变量随每次 `state_patch` 持久化，跨回合保留。`get_variable` / `set_variable` 工具让 LLM 读写这些值。
+
+**情绪值注入 Prompt（PresetEntry + 变量宏）：完整支持**
+```
+[PresetEntry, InjectionOrder=1]
+当前世界情绪状态：紧张度 {{emotion.tension}}/100，玩家好感 {{emotion.affinity}}/100。
+请根据以上状态调整你的叙事语气和 NPC 行为倾向。
+```
+变量宏在每轮展开——情绪值**直接影响 LLM 输出风格**，零后端代码。
+
+**情绪值更新（state_patch）：完整支持**
+
+LLM 在响应中输出：
+```xml
+<state_patch>
+{"emotion": {"tension": 55, "affinity": 52, "viral_heat": 35}}
+</state_patch>
+```
+WE 自动将 state_patch 写回变量沙箱，下一回合生效。
+
+---
+
+### 当前方案的 7 个改进点
+
+#### 改进 1：情绪值需要时间衰减
+
+**问题：** 没有衰减机制时，一次极端事件（tension 冲到 95）会永久锁定世界氛围，后续所有回合的 NPC 都是敌对状态。
+
+**建议：** 参考 WE 的记忆半衰期（`HalfLifeDays`），为情绪值设计"每回合衰减系数"。
+实现方式不需要后端改动：在游戏的 PresetEntry 里告诉 LLM：
+
+```
+每个回合，请在 state_patch 中将 emotion.tension 向基准值（40）回归：
+新值 = 当前值 × 0.85 + 基准值 × 0.15
+除非本回合有明确的紧张事件，否则不要将 tension 提升超过 10。
+```
+
+或在 `floor_history` 工具中读取最近 N 回合的值，计算趋势后决定是否衰减。
+
+#### 改进 2：全局情绪 vs. 个体情绪需要分层
+
+**问题：** 单一全局情绪值无法区���"玩家和 A 角色关系很好，但和 B 角色关系很差"。
+
+**建议：** 两层结构：
+```
+emotion.global      → 影响所有 NPC 的世界氛围（气候）
+emotion.npc.<name>  → 影响单个 NPC 对玩家的态度（个体天气）
+```
+WorldbookEntry 的关键词触发可以让个体情绪只在该角色相关的上下文中注入：
+```json
+{ "keys": ["夜歌", "@yege_official"],
+  "content": "夜歌对玩家当前信任度：{{emotion.npc.夜歌.trust}}/100。" }
+```
+
+#### 改进 3：玩家行为→情绪 delta 的映射需要游戏层定义
+
+**问题：** 目前没有定义"玩家点赞 = 情绪变化多少"，这个映射是游戏设计的核心参数，但 WE 没有存储它的地方。
+
+**建议：** 在 `GameTemplate.Config` 中定义行为映射表：
+```json
+"emotion_deltas": {
+  "player_like":    { "affinity": +5,  "viral_heat": +3 },
+  "player_comment": { "affinity": +8,  "tension": +2   },
+  "player_argue":   { "affinity": -12, "tension": +15  },
+  "player_share":   { "viral_heat": +10 },
+  "npc_post":       { "viral_heat": +2  }
+}
+```
+前端在玩家操作时直接读取这张表，计算新情绪值，和下一次 PlayTurn 的 `variables` 一起发送。**不需要 LLM 参与这一步**，纯客户端数学计算，响应速度为零延迟。
+
+#### 改进 4：前端随机因子需要明确的触发规则契约
+
+**问题：** 前端要判断"情绪值跨阈是否触发生成"，但触发规则散落在设计文档里，不在 WE 数据里，前端无法自动化。
+
+**建议：** 在 `GameTemplate.Config` 中定义触发规则（同时也作为 ScheduledTurn 的配置来源）：
+```json
+"trigger_rules": [
+  {
+    "id": "hostile_npc",
+    "condition_var": "emotion.tension",
+    "threshold": 70,
+    "probability": 0.75,
+    "cooldown_floors": 3,
+    "generation_hint": "[SYSTEM: 紧张状态，生成一条 NPC 敌对帖子]"
+  },
+  {
+    "id": "viral_explosion",
+    "condition_var": "emotion.viral_heat",
+    "threshold": 80,
+    "probability": 1.0,
+    "cooldown_floors": 10,
+    "generation_hint": "[SYSTEM: 话题爆炸，生成一波 Tier 2 机构跟帖]"
+  }
+]
+```
+前端逻辑：
+```js
+const rule = triggerRules.find(r =>
+  getVar(r.condition_var) >= r.threshold &&
+  Math.random() < r.probability &&
+  floorsElapsed(r.id) >= r.cooldown_floors
+)
+if (rule) callPlayTurn({ user_input: rule.generation_hint })
+```
+**好处：** 触发规则是游戏数据，不是硬编码；同一套规则可以被 ScheduledTurn 复用。
+
+#### 改进 5：情绪值到 LLM 风格的映射需要梯度设计，不只是开/关
+
+**问题：** 当前 PresetEntry 是静态文本，只能传递"tension=55"这个数字，LLM 需要自己理解这个数字的含义，理解质量不稳定。
+
+**建议：** 用多档 WorldbookEntry 描述情绪含义，在对应变量范围内激���：
+```
+WorldbookEntry A: keys=["{{emotion.tension}} > 80"]（或通过 Constant + 前端 enable/disable 控制）
+  content: "【世界警告】全局紧张度极高，NPC 普遍处于防御和攻击状态，任何对话都可能演变成冲突。"
+
+WorldbookEntry B: keys=常驻 content:
+  "当前情绪状态摘要：紧张度 {{emotion.tension}}/100（{{tension_label}}）"
+```
+或更直接：通过 `worldbook_update` 工具在触发时动态更新常驻词条内容，让语言描述而非数字驱动 LLM 风格。
+
+#### 改进 6：生成后情绪值反馈需要闭环稳定性设计
+
+**问题：** 高 tension → 触发生成 → LLM 生成敌对内容 → state_patch 设置 tension += 20 → 立刻再次触发 → 无限循环。
+
+**建议：** 明确冷却机制和衰减契约：
+- 触发规则中的 `cooldown_floors` 防止连续触发（见改进 4）
+- 生成后 state_patch 应**降低**触发维度的情绪值（tension 回到阈值以下），而不是升高
+- LLM 的 state_patch 指令中明确写入："生成完成后，将 emotion.tension 降低 25，代表紧张状态已释放"
+- `emotion_deltas` 表中可以添加 `after_generation_cooldown` 字段
+
+#### 改进 7：情绪变化需要作为叙事钩子（不只是数字）
+
+**问题：** 情绪值是隐藏数字，玩家无法感知世界"为什么变了"。
+
+**建议：** 当情绪值跨越重要阈值时，**同步写入一条 Memory（事实记忆）和一条新 WorldbookEntry**：
+```
+[generation_hint 触发后，LLM 被指示执行:]
+<state_patch>{"emotion": {"tension": 48}}</state_patch>
+[同时 LLM 调用工具:]
+memory_create("由于玩家的激烈争论，全场气氛陷入紧张，NPC 们开始表现出不安。", importance=0.9)
+worldbook_create(keys=["紧张事件", "气氛"], content="玩家昨日的言论引发了一场公开争议，各方情绪尚未平息。", constant=false)
+```
+这样情绪值的变化就变成了**有叙事意义的世界事件**，后续回合的 NPC 会"记得"这件事。
+
+---
+
+### 完整情绪驱动流程（设计师零后端视角）
+
+```
+玩家操作（点赞/评论/争论）
+    │
+    ▼ [前端] 查 emotion_deltas 表 → 更新本地情绪值
+    │
+    ▼ [前端] 检查 trigger_rules × random() → 决定是否触发
+    │
+   ┌┤ 不触发：用更新后的变量调用 PlayTurn（正常回合）
+   ││
+   └┤ 触发：调用 PlayTurn，user_input = rule.generation_hint
+    │
+    ▼ [WE] 变量宏展开 → 情绪值注入 Prompt（PresetEntry + WorldbookEntry）
+    │
+    ▼ [WE] LLM 生成内容（风格受情绪值影响）
+    │
+    ▼ [WE] 解析 state_patch → 情绪值写回变量沙箱
+    │
+    ▼ [WE] LLM 可选调用 memory_create / worldbook_create（叙事钩子）
+    │
+    ▼ [前端] 渲染响应 + 根据新情绪值更新 UI 风格（背景色/音乐/动画）
+```
+
+**当前 WE 支持以上流程的全部步骤，不需要写任何后端代码。**
+唯一缺失的是 `emotion_deltas` 和 `trigger_rules` 的读取 API（读 GameTemplate.Config 的结构化字段），
+这是一个极小的 creation API 扩展，或前端直接读 `/api/v2/create/templates/:id` 响应体即可。
+
+---
+
+### 与 ScheduledTurn 的关系（待实现）
+
+情绪驱动模型目前依赖**前端检测触发**。当 ScheduledTurn 实现后：
+
+```json
+"scheduled_turns": [
+  {
+    "mode": "variable_threshold",
+    "condition_var": "emotion.tension",
+    "threshold": 70,
+    "probability": 0.6,
+    "cooldown_floors": 3,
+    "user_input": "[SYSTEM: 紧张状态自主触发]"
+  }
+]
+```
+
+服务端在每次 PlayTurn 完成后检查规则，自动调度下一回合，**无需前端轮询**。
+这是情绪驱动模型的最终形态：玩家不操作时，世界也会因为情绪值达到阈值自动演化。
+
+---
+
 ## 本地运行说明（测试用）
 
 ```bash
