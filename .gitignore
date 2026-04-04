@@ -1,0 +1,21 @@
+# Binaries
+*.exe
+*.out
+*.bin
+server
+worker
+
+# Build output
+dist/
+build/
+
+# Uploads / user-generated content
+uploads/
+
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# Go workspace
+vendor/
