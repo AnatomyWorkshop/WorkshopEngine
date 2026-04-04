@@ -14,12 +14,25 @@ type PresetEntry struct {
 
 // WorldbookEntry 代表一条世界书/Lorebook规则
 type WorldbookEntry struct {
-	ID       string   `json:"id"`
-	Keys     []string `json:"keys"`     // 触发关键词，如果为空且 Constant=true 则常驻
-	Content  string   `json:"content"`  // 注入的文本内容
-	Constant bool     `json:"constant"` // 是否无视关键词常驻
-	Priority int      `json:"priority"` // 优先级，影响在 PromptBlock 中的排序
-	Enabled  bool     `json:"enabled"`
+	ID             string   `json:"id"`
+	Keys           []string `json:"keys"`            // 主关键词（任意一条匹配即触发）
+	SecondaryKeys  []string `json:"secondary_keys"`  // 次级关键词（与 SecondaryLogic 配合）
+	SecondaryLogic string   `json:"secondary_logic"` // and_any | and_all | not_any | not_all（默认 and_any）
+	Content        string   `json:"content"`
+	Constant       bool     `json:"constant"`
+	Priority       int      `json:"priority"`
+	ScanDepth      int      `json:"scan_depth"` // 0 = 全部消息；N = 只扫最近 N 条
+	Position       string   `json:"position"`   // before_template | after_template | at_depth
+	WholeWord      bool     `json:"whole_word"`
+	Enabled        bool     `json:"enabled"`
+}
+
+// RegexRule Prompt 后处理正则规则（来自 DB RegexRule，去掉 DB 字段）
+type RegexRule struct {
+	Pattern     string // 正则表达式（支持 /pattern/flags 格式）
+	Replacement string // 替换字符串（支持 $1 捕获组）
+	ApplyTo     string // ai_output | user_input | all
+	Enabled     bool
 }
 
 // GameConfig 是执行一回合所需的静态模板配置 (由外层从 DB 加载)
@@ -28,6 +41,7 @@ type GameConfig struct {
 	WorldbookEntries     []WorldbookEntry // 该游戏挂载的所有世界书词条
 	MemorySummary        string           // 之前异步生成的长期记忆摘要
 	PresetEntries        []PresetEntry    // 条目化 Prompt 组装（优先于 SystemPromptTemplate）
+	RegexRules           []RegexRule      // 后处理正则规则（ai_output / user_input / all）
 
 	// MemoryLabel 注入记忆摘要时的标签前缀（默认 "[Memory Summary]\n"）。
 	// 可通过 GameTemplate.Config.memory_label 按游戏覆盖。

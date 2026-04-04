@@ -212,6 +212,7 @@ func RegisterCreationRoutes(rg *gin.RouterGroup, db *gorm.DB) {
 
 	registerLLMProfileRoutes(create, db)
 	registerPresetEntryRoutes(create, db)
+	registerRegexProfileRoutes(create, db)
 }
 
 // registerLLMProfileRoutes 注册 LLM 配置 CRUD 路由（/api/v2/create/llm-profiles/...）
@@ -564,6 +565,155 @@ func orBool(v *bool, def bool) bool {
 		return def
 	}
 	return *v
+}
+
+// registerRegexProfileRoutes 注册 Regex Profile CRUD 路由
+// （/api/v2/create/templates/:id/regex-profiles/ 和 /regex-profiles/:pid/rules/）
+func registerRegexProfileRoutes(rg *gin.RouterGroup, db *gorm.DB) {
+	rp := rg.Group("/templates/:id/regex-profiles")
+
+	// GET — 列出该游戏的 Regex Profile
+	rp.GET("", func(c *gin.Context) {
+		var profiles []dbmodels.RegexProfile
+		db.Where("game_id = ?", c.Param("id")).Order("created_at ASC").Find(&profiles)
+		c.JSON(http.StatusOK, gin.H{"code": 0, "data": profiles})
+	})
+
+	// POST — 创建 Profile
+	rp.POST("", func(c *gin.Context) {
+		var body struct {
+			Name    string `json:"name" binding:"required"`
+			Enabled *bool  `json:"enabled"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		profile := dbmodels.RegexProfile{
+			GameID:  c.Param("id"),
+			Name:    body.Name,
+			Enabled: orBool(body.Enabled, true),
+		}
+		if err := db.Create(&profile).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"code": 0, "data": profile})
+	})
+
+	// PATCH /:pid — 更新 Profile
+	rp.PATCH("/:pid", func(c *gin.Context) {
+		var updates map[string]any
+		if err := c.ShouldBindJSON(&updates); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		delete(updates, "id")
+		delete(updates, "game_id")
+		if err := db.Model(&dbmodels.RegexProfile{}).
+			Where("id = ? AND game_id = ?", c.Param("pid"), c.Param("id")).
+			Updates(updates).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		var profile dbmodels.RegexProfile
+		db.First(&profile, "id = ?", c.Param("pid"))
+		c.JSON(http.StatusOK, gin.H{"code": 0, "data": profile})
+	})
+
+	// DELETE /:pid — 删除 Profile 及其规则
+	rp.DELETE("/:pid", func(c *gin.Context) {
+		db.Where("profile_id = ?", c.Param("pid")).Delete(&dbmodels.RegexRule{})
+		db.Where("id = ? AND game_id = ?", c.Param("pid"), c.Param("id")).Delete(&dbmodels.RegexProfile{})
+		c.JSON(http.StatusOK, gin.H{"code": 0, "data": gin.H{"id": c.Param("pid"), "deleted": true}})
+	})
+
+	// ── Rules 子路由（/regex-profiles/:pid/rules）─────────────
+	rules := rg.Group("/regex-profiles/:pid/rules")
+
+	// GET — 列出规则（按 order 升序）
+	rules.GET("", func(c *gin.Context) {
+		var list []dbmodels.RegexRule
+		db.Where("profile_id = ?", c.Param("pid")).Order("\"order\" ASC").Find(&list)
+		c.JSON(http.StatusOK, gin.H{"code": 0, "data": list})
+	})
+
+	// POST — 新建规则
+	rules.POST("", func(c *gin.Context) {
+		var body struct {
+			Name        string `json:"name"`
+			Pattern     string `json:"pattern"  binding:"required"`
+			Replacement string `json:"replacement"`
+			ApplyTo     string `json:"apply_to"`
+			Order       *int   `json:"order"`
+			Enabled     *bool  `json:"enabled"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		rule := dbmodels.RegexRule{
+			ProfileID:   c.Param("pid"),
+			Name:        body.Name,
+			Pattern:     body.Pattern,
+			Replacement: body.Replacement,
+			ApplyTo:     orStr(body.ApplyTo, "ai_output"),
+			Order:       orInt(body.Order, 0),
+			Enabled:     orBool(body.Enabled, true),
+		}
+		if err := db.Create(&rule).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"code": 0, "data": rule})
+	})
+
+	// PATCH /:rid — 部分更新规则
+	rules.PATCH("/:rid", func(c *gin.Context) {
+		var updates map[string]any
+		if err := c.ShouldBindJSON(&updates); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		delete(updates, "id")
+		delete(updates, "profile_id")
+		if err := db.Model(&dbmodels.RegexRule{}).
+			Where("id = ? AND profile_id = ?", c.Param("rid"), c.Param("pid")).
+			Updates(updates).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		var rule dbmodels.RegexRule
+		db.First(&rule, "id = ?", c.Param("rid"))
+		c.JSON(http.StatusOK, gin.H{"code": 0, "data": rule})
+	})
+
+	// DELETE /:rid — 删除规则
+	rules.DELETE("/:rid", func(c *gin.Context) {
+		db.Where("id = ? AND profile_id = ?", c.Param("rid"), c.Param("pid")).
+			Delete(&dbmodels.RegexRule{})
+		c.JSON(http.StatusOK, gin.H{"code": 0, "data": gin.H{"id": c.Param("rid"), "deleted": true}})
+	})
+
+	// PUT /reorder — 批量调整 order
+	rules.PUT("/reorder", func(c *gin.Context) {
+		var items []struct {
+			ID    string `json:"id"    binding:"required"`
+			Order int    `json:"order"`
+		}
+		if err := c.ShouldBindJSON(&items); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		for _, item := range items {
+			db.Model(&dbmodels.RegexRule{}).
+				Where("id = ? AND profile_id = ?", item.ID, c.Param("pid")).
+				Update("order", item.Order)
+		}
+		var list []dbmodels.RegexRule
+		db.Where("profile_id = ?", c.Param("pid")).Order("\"order\" ASC").Find(&list)
+		c.JSON(http.StatusOK, gin.H{"code": 0, "data": list})
+	})
 }
 
 // slugify 将名称转为 URL-safe slug（保留 ASCII 字母数字，中文用 uuid 兜底）

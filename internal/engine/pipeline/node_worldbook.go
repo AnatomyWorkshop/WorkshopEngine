@@ -7,90 +7,216 @@ import (
 	"mvu-backend/internal/engine/prompt_ir"
 )
 
-// WorldbookNode 负责扫描最近的历史，匹配并注入世界书规则
+// WorldbookNode 扫描历史消息，匹配并注入世界书词条。
+//
+// # 触发逻辑
+//
+//  1. 常驻词条（Constant=true）无条件注入。
+//  2. 主关键词（Keys）：任意一条命中即通过。
+//     支持 "regex:<pattern>" 前缀（Go regexp，自动添加 (?i)）；
+//     WholeWord=true 时要求词边界匹配。
+//  3. 次级关键词（SecondaryKeys + SecondaryLogic）：在主关键词通过后额外检查。
+//     - and_any : 次级关键词中至少一条命中
+//     - and_all : 次级关键词全部命中
+//     - not_any : 次级关键词全部未命中
+//     - not_all : 次级关键词中至少一条未命中
+//  4. ScanDepth > 0 时只扫描最近 ScanDepth 条消息（不包括当前用户输入）。
+//  5. 首次扫描完成后，额外进行一次递归扫描：
+//     将已激活词条的 Content 拼接为新的扫描文本，再扫描剩余未激活词条一次。
+//
+// # 注入位置
+//
+//   - "before_template" : Priority = 10 + priority_offset（在 TemplateNode 1000 之前）
+//   - "after_template"  : Priority = 1050 + priority_offset（在 TemplateNode 1000 之后）
+//   - "at_depth"        : Priority = -200 - priority_offset（嵌入历史段）
 type WorldbookNode struct{}
 
 func NewWorldbookNode() *WorldbookNode {
 	return &WorldbookNode{}
 }
 
-func (n *WorldbookNode) Name() string {
-	return "WorldbookNode"
-}
+func (n *WorldbookNode) Name() string { return "WorldbookNode" }
 
 func (n *WorldbookNode) Process(ctx *prompt_ir.ContextData) error {
-	if len(ctx.Config.WorldbookEntries) == 0 {
+	entries := ctx.Config.WorldbookEntries
+	if len(entries) == 0 {
 		return nil
 	}
 
-	// 1. 构建扫描文本 (把最近的历史拼起来)
-	var scanTextBuilder strings.Builder
-	for _, msg := range ctx.RecentMessages {
-		scanTextBuilder.WriteString(msg.Content)
-		scanTextBuilder.WriteString("\n")
-	}
-	scanText := scanTextBuilder.String()
+	// ── 构建扫描文本 ─────────────────────────────────────────
+	// recentMessages 中最后一条是本轮用户输入，前面是历史
+	msgs := ctx.RecentMessages
+	scanText := buildScanText(msgs, 0) // 全量扫描，用于 ScanDepth=0 情形
 
-	// 2. 判定哪些词条被触发
-	var activatedEntries []prompt_ir.WorldbookEntry
+	// ── 第一次扫描 ──────────────────────────────────────────
+	activated := make([]prompt_ir.WorldbookEntry, 0, len(entries))
+	activatedIDs := make(map[string]bool, len(entries))
+	remaining := make([]prompt_ir.WorldbookEntry, 0, len(entries))
 
-	for _, entry := range ctx.Config.WorldbookEntries {
+	for _, entry := range entries {
 		if !entry.Enabled {
 			continue
 		}
-
-		// 如果是常驻词条，无条件触发
 		if entry.Constant {
-			activatedEntries = append(activatedEntries, entry)
+			activated = append(activated, entry)
+			activatedIDs[entry.ID] = true
 			continue
 		}
 
-		// 关键词匹配（支持 "regex:<pattern>" 前缀，否则大小写不敏感子串匹配）
-		triggered := false
-		for _, key := range entry.Keys {
-			if matchWorldbookKey(scanText, key) {
-				triggered = true
-				break
-			}
+		// 按词条的 ScanDepth 构建各自的扫描窗口
+		text := scanText
+		if entry.ScanDepth > 0 {
+			text = buildScanText(msgs, entry.ScanDepth)
 		}
 
-		if triggered {
-			activatedEntries = append(activatedEntries, entry)
+		if n.matches(text, entry) {
+			activated = append(activated, entry)
+			activatedIDs[entry.ID] = true
+		} else {
+			remaining = append(remaining, entry)
 		}
 	}
 
-	// 3. 将触发的词条组装成 PromptBlocks
-	for _, entry := range activatedEntries {
-		resolvedContent := n.resolveMacros(entry.Content, ctx.Variables)
+	// ── 递归扫描（1 级） ─────────────────────────────────────
+	// 把已激活词条的内容拼起来，再对剩余词条扫描一次
+	if len(activated) > 0 && len(remaining) > 0 {
+		var recursiveScan strings.Builder
+		for _, e := range activated {
+			recursiveScan.WriteString(e.Content)
+			recursiveScan.WriteString("\n")
+		}
+		recText := recursiveScan.String()
+
+		for _, entry := range remaining {
+			if !entry.Enabled || entry.Constant {
+				continue
+			}
+			if n.matches(recText, entry) {
+				activated = append(activated, entry)
+			}
+		}
+	}
+
+	// ── 组装 PromptBlocks ─────────────────────────────────────
+	for _, entry := range activated {
+		content := n.resolveMacros(entry.Content, ctx.Variables)
+		priority := positionToPriority(entry.Position, entry.Priority)
 
 		ctx.Blocks = append(ctx.Blocks, prompt_ir.PromptBlock{
 			Type:     prompt_ir.BlockWorldbook,
 			Role:     "system",
-			Content:  resolvedContent,
-			Priority: 10 + entry.Priority, // 基础权重10，再加上创作者设定的优先级偏移
+			Content:  content,
+			Priority: priority,
 		})
 	}
 
 	return nil
 }
 
-// matchWorldbookKey 判断 scanText 是否匹配一条关键词。
+// matches 检查扫描文本是否满足词条的完整触发条件（主关键词 + 次级关键词逻辑门）。
+func (n *WorldbookNode) matches(text string, entry prompt_ir.WorldbookEntry) bool {
+	// 主关键词：任意一条匹配
+	primaryOK := false
+	for _, key := range entry.Keys {
+		if matchKey(text, key, entry.WholeWord) {
+			primaryOK = true
+			break
+		}
+	}
+	if !primaryOK {
+		return false
+	}
+
+	// 无次级关键词时直接通过
+	if len(entry.SecondaryKeys) == 0 {
+		return true
+	}
+
+	logic := entry.SecondaryLogic
+	if logic == "" {
+		logic = "and_any"
+	}
+
+	hits := 0
+	for _, key := range entry.SecondaryKeys {
+		if matchKey(text, key, entry.WholeWord) {
+			hits++
+		}
+	}
+	total := len(entry.SecondaryKeys)
+
+	switch logic {
+	case "and_any":
+		return hits > 0
+	case "and_all":
+		return hits == total
+	case "not_any":
+		return hits == 0
+	case "not_all":
+		return hits < total
+	default:
+		return hits > 0
+	}
+}
+
+// buildScanText 从消息列表末尾取 depth 条（0=全部）拼成扫描文本。
+func buildScanText(msgs []prompt_ir.Message, depth int) string {
+	target := msgs
+	if depth > 0 && depth < len(msgs) {
+		target = msgs[len(msgs)-depth:]
+	}
+	var sb strings.Builder
+	for _, m := range target {
+		sb.WriteString(m.Content)
+		sb.WriteByte('\n')
+	}
+	return sb.String()
+}
+
+// matchKey 检查单条关键词是否命中。
 //
-// 支持两种格式：
-//   - 普通字符串：大小写不敏感子串匹配（对齐 TH 默认行为）
-//   - "regex:<pattern>"：Go regexp，大小写不敏感（(?i) 自动添加）
-func matchWorldbookKey(scanText, key string) bool {
+// 格式支持：
+//   - "regex:<pattern>" — Go regexp，自动加 (?i)；出错降级为字面量
+//   - 普通字符串       — 大小写不敏感子串（wholeWord=true 时加 \b 边界）
+func matchKey(text, key string, wholeWord bool) bool {
 	const regexPrefix = "regex:"
 	if strings.HasPrefix(key, regexPrefix) {
 		pattern := key[len(regexPrefix):]
 		re, err := regexp.Compile("(?i)" + pattern)
 		if err != nil {
-			// 非法正则降级为字面量匹配
-			return strings.Contains(strings.ToLower(scanText), strings.ToLower(pattern))
+			return strings.Contains(strings.ToLower(text), strings.ToLower(strings.TrimSpace(pattern)))
 		}
-		return re.MatchString(scanText)
+		return re.MatchString(text)
 	}
-	return strings.Contains(strings.ToLower(scanText), strings.ToLower(strings.TrimSpace(key)))
+
+	literal := strings.TrimSpace(key)
+	if wholeWord {
+		re, err := regexp.Compile(`(?i)\b` + regexp.QuoteMeta(literal) + `\b`)
+		if err != nil {
+			return strings.Contains(strings.ToLower(text), strings.ToLower(literal))
+		}
+		return re.MatchString(text)
+	}
+	return strings.Contains(strings.ToLower(text), strings.ToLower(literal))
+}
+
+// positionToPriority 将 WorldbookEntry.Position 映射为 PromptBlock.Priority 数值。
+//
+// Priority 越小越靠前（靠近 System Prompt 顶部）。当前节点参考值：
+//
+//	TemplateNode   1000
+//	WorldbookNode  10~510 (before_template 默认)
+//	MemoryNode     400
+//	HistoryNode    0~-N
+func positionToPriority(position string, offset int) int {
+	switch position {
+	case "after_template":
+		return 1050 + offset
+	case "at_depth":
+		return -200 - offset
+	default: // "before_template" 及任何未知值
+		return 10 + offset
+	}
 }
 
 func (n *WorldbookNode) resolveMacros(text string, vars map[string]any) string {

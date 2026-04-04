@@ -11,6 +11,7 @@ import (
 	"mvu-backend/internal/engine/memory"
 	"mvu-backend/internal/engine/parser"
 	"mvu-backend/internal/engine/pipeline"
+	"mvu-backend/internal/engine/processor"
 	"mvu-backend/internal/engine/prompt_ir"
 	"mvu-backend/internal/engine/session"
 	"mvu-backend/internal/engine/tools"
@@ -133,6 +134,13 @@ func (e *GameEngine) PlayTurn(ctx context.Context, req TurnRequest) (*TurnRespon
 	e.db.Where("game_id = ? AND enabled = true", sess.GameID).
 		Order("injection_order ASC").Find(&presetEntries)
 
+	// 读取 Regex 规则（按 profile + order 排序）
+	var dbRegexRules []dbmodels.RegexRule
+	e.db.Joins("JOIN regex_profiles ON regex_rules.profile_id = regex_profiles.id").
+		Where("regex_profiles.game_id = ? AND regex_profiles.enabled = true AND regex_rules.enabled = true", sess.GameID).
+		Order("regex_rules.order ASC").
+		Find(&dbRegexRules)
+
 	// 解析模板 Config JSONB（memory_label / fallback_options / enabled_tools 等可选字段）
 	var tmplCfg struct {
 		MemoryLabel     string   `json:"memory_label"`     // 记忆注入标签前缀
@@ -196,13 +204,31 @@ func (e *GameEngine) PlayTurn(ctx context.Context, req TurnRequest) (*TurnRespon
 	for _, entry := range wbEntries {
 		var keys []string
 		_ = json.Unmarshal(entry.Keys, &keys)
+		var secondaryKeys []string
+		_ = json.Unmarshal(entry.SecondaryKeys, &secondaryKeys)
 		wbIR = append(wbIR, prompt_ir.WorldbookEntry{
-			ID:       entry.ID,
-			Keys:     keys,
-			Content:  entry.Content,
-			Constant: entry.Constant,
-			Priority: entry.Priority,
-			Enabled:  entry.Enabled,
+			ID:             entry.ID,
+			Keys:           keys,
+			SecondaryKeys:  secondaryKeys,
+			SecondaryLogic: entry.SecondaryLogic,
+			Content:        entry.Content,
+			Constant:       entry.Constant,
+			Priority:       entry.Priority,
+			ScanDepth:      entry.ScanDepth,
+			Position:       entry.Position,
+			WholeWord:      entry.WholeWord,
+			Enabled:        entry.Enabled,
+		})
+	}
+
+	// ── 6b. 将 Regex 规则转换为 IR ──────────────────────────
+	var regexRules []prompt_ir.RegexRule
+	for _, r := range dbRegexRules {
+		regexRules = append(regexRules, prompt_ir.RegexRule{
+			Pattern:     r.Pattern,
+			Replacement: r.Replacement,
+			ApplyTo:     r.ApplyTo,
+			Enabled:     r.Enabled,
 		})
 	}
 
@@ -222,6 +248,8 @@ func (e *GameEngine) PlayTurn(ctx context.Context, req TurnRequest) (*TurnRespon
 	}
 
 	// ── 7. 构建历史消息列表（含本次用户输入） ─────────────────
+	// 用户输入先经过 user_input 类型 regex 规则转换
+	userInput := processor.ApplyToUserInput(req.UserInput, regexRules)
 	var recentMsgs []prompt_ir.Message
 	for _, m := range history {
 		recentMsgs = append(recentMsgs, prompt_ir.Message{
@@ -229,7 +257,7 @@ func (e *GameEngine) PlayTurn(ctx context.Context, req TurnRequest) (*TurnRespon
 		})
 	}
 	recentMsgs = append(recentMsgs, prompt_ir.Message{
-		Role: "user", Content: req.UserInput,
+		Role: "user", Content: userInput,
 	})
 
 	// ── 8. 运行 Prompt Pipeline ────────────────────────────────
@@ -242,6 +270,7 @@ func (e *GameEngine) PlayTurn(ctx context.Context, req TurnRequest) (*TurnRespon
 			MemorySummary:        memorySummary,
 			MemoryLabel:          tmplCfg.MemoryLabel,
 			FallbackOptions:      tmplCfg.FallbackOptions,
+			RegexRules:           regexRules,
 		},
 		Variables:      sb.Flatten(),
 		RecentMessages: recentMsgs,
@@ -320,6 +349,11 @@ func (e *GameEngine) PlayTurn(ctx context.Context, req TurnRequest) (*TurnRespon
 
 	// ── 11. 解析 AI 响应（三层回退） ──────────────────────────
 	parsed := parser.Parse(llmResp.Content)
+
+	// 对 narrative 应用 ai_output 类型 regex 后处理
+	if len(regexRules) > 0 {
+		parsed.Narrative = processor.ApplyToAIOutput(parsed.Narrative, regexRules)
+	}
 
 	// 如果选项为空（通常是 fallback 模式），使用模板配置的兜底选项
 	if len(parsed.Options) == 0 && len(tmplCfg.FallbackOptions) > 0 {

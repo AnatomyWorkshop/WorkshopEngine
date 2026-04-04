@@ -118,15 +118,20 @@ type GameTemplate struct {
 
 // WorldbookEntry 世界书词条（独立于游戏模板，支持多对多）
 type WorldbookEntry struct {
-	ID         string         `gorm:"primaryKey;type:uuid;default:gen_random_uuid()" json:"id"`
-	GameID     string         `gorm:"not null;index"                                json:"game_id"` // 关联游戏（未来可改为多对多）
-	Keys       datatypes.JSON `gorm:"type:jsonb;default:'[]'"                       json:"keys"`    // []string 触发关键词
-	Content    string         `gorm:"type:text;not null"                            json:"content"`
-	Constant   bool           `gorm:"default:false"                                 json:"constant"` // 无条件常驻
-	Priority   int            `gorm:"default:0"                                     json:"priority"` // 优先级偏移
-	Enabled    bool           `gorm:"default:true"                                  json:"enabled"`
-	Comment    string         `json:"comment"` // 创作者注释
-	CreatedAt  time.Time      `json:"created_at"`
+	ID             string         `gorm:"primaryKey;type:uuid;default:gen_random_uuid()" json:"id"`
+	GameID         string         `gorm:"not null;index"                                json:"game_id"`
+	Keys           datatypes.JSON `gorm:"type:jsonb;default:'[]'"                       json:"keys"`            // []string 主关键词（至少一条匹配即触发）
+	SecondaryKeys  datatypes.JSON `gorm:"type:jsonb;default:'[]'"                       json:"secondary_keys"`  // []string 次级关键词
+	SecondaryLogic string         `gorm:"default:'and_any'"                             json:"secondary_logic"` // and_any | and_all | not_any | not_all
+	Content        string         `gorm:"type:text;not null"                            json:"content"`
+	Constant       bool           `gorm:"default:false"                                 json:"constant"`    // 无条件常驻
+	Priority       int            `gorm:"default:0"                                     json:"priority"`    // 优先级偏移
+	ScanDepth      int            `gorm:"default:0"                                     json:"scan_depth"`  // 扫描最近 N 条消息（0 = 全部）
+	Position       string         `gorm:"default:'before_template'"                     json:"position"`    // before_template | after_template | at_depth
+	WholeWord      bool           `gorm:"default:false"                                 json:"whole_word"`  // 全词匹配
+	Enabled        bool           `gorm:"default:true"                                  json:"enabled"`
+	Comment        string         `json:"comment"`
+	CreatedAt      time.Time      `json:"created_at"`
 }
 
 // PresetEntry 条目化 Prompt 组装（复刻 TH 的 preset-entries 系统）。
@@ -208,4 +213,41 @@ type LLMProfileBinding struct {
 	Params    datatypes.JSON `gorm:"type:jsonb;default:'{}'"                         json:"params"`     // 在 Profile Params 之上额外覆盖
 	CreatedAt time.Time      `json:"created_at"`
 	UpdatedAt time.Time      `json:"updated_at"`
+}
+
+// ──────────────────────────────────────────────────────
+// Regex 后处理系统（复刻 TH adapters-sillytavern regex-engine）
+// RegexProfile 可绑定到游戏；RegexRule 是独立的正则替换规则
+// ──────────────────────────────────────────────────────
+
+// RegexProfile 一组可复用的正则规则集（绑定到游戏模板）
+type RegexProfile struct {
+	ID        string    `gorm:"primaryKey;type:uuid;default:gen_random_uuid()" json:"id"`
+	GameID    string    `gorm:"not null;index"                                  json:"game_id"` // 关联游戏（未来可设 null 表示全局）
+	Name      string    `gorm:"not null"                                        json:"name"`
+	Enabled   bool      `gorm:"default:true"                                    json:"enabled"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// RegexRule 单条正则替换规则（隶属于 RegexProfile）。
+//
+// Pattern 支持两种格式：
+//   - 普通字符串：`hello world`（整体作为 Go regexp 模式）
+//   - /pattern/flags 格式：`/hello/i`（flags 支持 i=忽略大小写, m=多行, s=点匹配换行）
+//
+// ApplyTo 控制规则作用阶段：
+//   - "ai_output" : 作用于 LLM 返回文本（ParsedResponse.Narrative）
+//   - "user_input": 作用于用户输入（TurnRequest.UserInput）
+//   - "all"       : 两者均应用
+type RegexRule struct {
+	ID          string    `gorm:"primaryKey;type:uuid;default:gen_random_uuid()" json:"id"`
+	ProfileID   string    `gorm:"not null;index"                                  json:"profile_id"`   // 关联 RegexProfile
+	Name        string    `json:"name"`                                                                // 可选标注
+	Pattern     string    `gorm:"not null"                                        json:"pattern"`      // 正则表达式
+	Replacement string    `json:"replacement"`                                                         // 替换字符串（支持 $1 等捕获组引用）
+	ApplyTo     string    `gorm:"default:'ai_output'"                             json:"apply_to"`     // ai_output | user_input | all
+	Order       int       `gorm:"default:0"                                       json:"order"`        // 执行顺序（小→先执行）
+	Enabled     bool      `gorm:"default:true"                                    json:"enabled"`
+	CreatedAt   time.Time `json:"created_at"`
 }

@@ -359,6 +359,28 @@ TurnRequest
 - `prompt_ir/pipeline.go`：`GameConfig` 加入 `MemoryLabel` 和 `FallbackOptions`
 - `engine/api/game_loop.go`：从模板 Config JSONB 解析 `memory_label` / `fallback_options` 并注入管道
 
+### ✅ 已完成（第七轮 — Prompt 编排补全）
+
+**Regex Profile 系统（复刻 TH adapters-sillytavern regex-engine）**
+- `db/models.go`：新增 `RegexProfile` + `RegexRule` 表；`WorldbookEntry` 扩充 `SecondaryKeys`、`SecondaryLogic`、`ScanDepth`、`Position`、`WholeWord` 字段
+- `db/connect.go`：AutoMigrate 新增两张表
+- `prompt_ir/pipeline.go`：`WorldbookEntry` IR 补充新字段；新增 `RegexRule` IR 类型；`GameConfig` 增加 `RegexRules []RegexRule`
+- `internal/engine/processor/regex.go`（新包）：`ApplyToAIOutput` / `ApplyToUserInput`；支持 `/pattern/flags` 格式和 `$1` 捕获组替换
+- `creation/api/routes.go`：新增 `registerRegexProfileRoutes`（Profile CRUD + Rule CRUD + reorder）— 路径 `/create/templates/:id/regex-profiles/` 和 `/create/regex-profiles/:pid/rules/`
+- `engine/api/game_loop.go`：JOIN 加载 RegexRule；用户输入先经 `ApplyToUserInput`；解析后 narrative 经 `ApplyToAIOutput`；WorldbookEntry IR 转换携带全部新字段；RegexRules 注入 GameConfig
+
+**WorldInfo 编排增强**
+- `pipeline/node_worldbook.go` 全面重写：
+  - `ScanDepth`：每条词条独立扫描窗口（0 = 全量，N = 最近 N 条）
+  - `SecondaryKeys + SecondaryLogic`：AND_ANY / AND_ALL / NOT_ANY / NOT_ALL 四种逻辑门
+  - `WholeWord`：`\b` 词边界正则匹配
+  - `Position → Priority`：`before_template`=10+offset、`after_template`=1050+offset、`at_depth`=-200-offset
+  - **递归激活**（1 级）：首次扫描后，以已激活词条的 Content 为文本再扫描一次剩余词条
+
+**Tool ReplaySafety 分级**
+- `tools/registry.go`：`ReplaySafety` 类型 + 4 个常量（safe / confirm_on_replay / never_auto_replay / uncertain）；`Tool` 接口增加 `ReplaySafety()` 方法；`Registry.ReplaySafetyOf(name)` 查询接口
+- `tools/builtins.go`：`get_variable`=safe、`set_variable`=confirm_on_replay、`search_memory`=safe
+
 ### ✅ 已完成（第六轮 — Tools / Function Calling）
 
 - `internal/engine/tools/registry.go`：`Tool` 接口 + `Registry`（Register、Execute、ToLLMDefinitions）
@@ -366,26 +388,22 @@ TurnRequest
 - `llm/client.go`：新增 `ToolDefinition`/`ToolCall`/`ToolCallFunction` 类型；`Message` / `Options` / `Response` / `buildBody` / `doChat` / `mergeOpts` 全部扩展支持 function calling
 - `game_loop.go`：主链路替换为 Agentic Tool Loop（最多 5 轮）；`tmplCfg.enabled_tools` 控制按需注册；无工具时单次直通
 
-### 📋 近期目标（Prompt 编排补全 — 对齐 SillyTavern 同类能力）
+### 📋 近期目标（精确 Token 计数）
 
-详细对比分析见 [`docs/st-comparison.md`](st-comparison.md)。
+| 功能 | 复杂度 | 说明 |
+|------|--------|------|
+| **精确 Token 计数（tiktoken-go）** | 低-中 | 替换 `1 token ≈ 1.5 汉字` 粗估；或用 API 响应 `usage.prompt_tokens` 做反馈校准 |
 
-| 功能 | 复杂度 | 价值 | 说明 |
-|------|--------|------|------|
-| **Regex 输出后处理规则** | 低 | 高 — 去除套话、格式规范化、标签注入 | `tmplCfg.output_transforms`，parser 后应用 |
-| **WorldInfo scan_depth + position** | 低-中 | 高 — 精确控制词条插入位置和扫描窗口 | WorldbookEntry 增加 `scan_depth`/`position`；node_worldbook 按深度触发 |
-| **WorldInfo 递归激活** | 低 | 中 — 已激活词条内容再触发新词条 | node_worldbook 二次扫描，可配置最大递归深度 |
-| **精确 Token 计数（tiktoken-go）** | 低-中 | 高 — 当前粗估误差大，影响上下文裁剪准确性 | 替换 `1 token ≈ 1.5 汉字` 估算 |
-
-### 📋 中期目标（引擎层真实差距）
+### 📋 中期目标（工具生态 + 多角色槽）
 
 | 功能 | 复杂度 | 价值 |
 |------|--------|------|
-| **MCP 协议接入** | 中 | 高 — Tools 层已建好，MCP 使任意社区工具无需手写适配即可注册 |
-| **多 LLM 角色槽（director/verifier）** | 中 | 中 — 多 AI 协作；director 控制剧情走向，verifier 校验输出格式 |
-| **多 Provider 注册表（Anthropic/Google）** | 中 | 中 — 非 OpenAI 兼容路径；目前 BYO Key 已覆盖大部分场景 |
+| **MCP 协议接入** | 中 | 高 — Tools 层已建好，MCP 标准化接入社区工具生态 |
+| **ResourceToolProvider（23 个资源工具）** | 中 | 高 — 在工具调用中 CRUD character / worldbook / preset / regex |
+| **多 LLM 角色槽（director/verifier）** | 中 | 中 — 多 AI 协作；director 剧情控制，verifier 输出校验 |
+| **多 Provider 注册表（Anthropic/Google）** | 中 | 中 — 非 OpenAI compat 路径 |
 | **Auth（JWT + 账户映射）** | 中 | 中 — 当前 admin key + X-Account-ID 足够单机/小团队 |
-| **对话导入/导出（ST JSON 格式）** | 低 | 中 — 跨客户端迁移对话历史 |
+| **对话导入/导出（ST .jsonl 格式）** | 低 | 中 — 跨客户端迁移历史 |
 
-设计思路见 [`docs/prompt-block-design.md`](prompt-block-design.md)（PromptBlock 扩展路径 + MVM 分层 + 存档分析）。
-能力边界分析见 [`docs/st-comparison.md`](st-comparison.md)（ST vs WorkshopEngine 全面对比）。
+能力边界分析见 [`docs/st-comparison.md`](st-comparison.md)。
+设计思路见 [`docs/prompt-block-design.md`](prompt-block-design.md)。

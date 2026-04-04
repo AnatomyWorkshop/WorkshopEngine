@@ -8,11 +8,27 @@ import (
 	"mvu-backend/internal/core/llm"
 )
 
+// ReplaySafety 工具重放安全等级（对齐 TH replay-safety.ts）。
+//
+//	Safe            — 幂等操作，可自动重放（读取类工具）
+//	ConfirmOnReplay — 重放前需用户确认（轻写操作）
+//	NeverAutoReplay — 禁止自动重放（不可逆写操作）
+//	Uncertain       — 不确定（外部副作用，如网络调用）
+type ReplaySafety string
+
+const (
+	ReplaySafe            ReplaySafety = "safe"
+	ReplayConfirmOnReplay ReplaySafety = "confirm_on_replay"
+	ReplayNeverAutoReplay ReplaySafety = "never_auto_replay"
+	ReplayUncertain       ReplaySafety = "uncertain"
+)
+
 // Tool 游戏工具接口。每个工具绑定所需依赖（沙箱、记忆库等），Execute 不需要传入 session 上下文。
 type Tool interface {
 	Name() string
 	Description() string
 	Parameters() json.RawMessage // JSON Schema object，定义参数结构
+	ReplaySafety() ReplaySafety  // 重放安全等级
 	Execute(ctx context.Context, params json.RawMessage) (string, error)
 }
 
@@ -61,4 +77,12 @@ func (r *Registry) ToLLMDefinitions() []llm.ToolDefinition {
 		})
 	}
 	return defs
+}
+
+// ReplaySafetyOf 返回指定工具的重放安全等级（工具不存在时返回 Uncertain）。
+func (r *Registry) ReplaySafetyOf(name string) ReplaySafety {
+	if t, ok := r.tools[name]; ok {
+		return t.ReplaySafety()
+	}
+	return ReplayUncertain
 }

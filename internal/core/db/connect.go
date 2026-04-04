@@ -39,5 +39,8 @@ func migrate(db *gorm.DB) error {
 		// LLM 配置层
 		&LLMProfile{},
 		&LLMProfileBinding{},
+		// Regex 后处理系统
+		&RegexProfile{},
+		&RegexRule{},
 	)
 }

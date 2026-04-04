@@ -19,8 +19,9 @@ func NewGetVariableTool(sb *variable.Sandbox) *GetVariableTool {
 	return &GetVariableTool{sb: sb}
 }
 
-func (t *GetVariableTool) Name() string        { return "get_variable" }
-func (t *GetVariableTool) Description() string { return "读取游戏变量的当前值" }
+func (t *GetVariableTool) Name() string         { return "get_variable" }
+func (t *GetVariableTool) Description() string  { return "读取游戏变量的当前值" }
+func (t *GetVariableTool) ReplaySafety() ReplaySafety { return ReplaySafe }
 func (t *GetVariableTool) Parameters() json.RawMessage {
 	return json.RawMessage(`{
 		"type": "object",
@@ -55,8 +56,9 @@ func NewSetVariableTool(sb *variable.Sandbox) *SetVariableTool {
 	return &SetVariableTool{sb: sb}
 }
 
-func (t *SetVariableTool) Name() string        { return "set_variable" }
-func (t *SetVariableTool) Description() string { return "设置游戏变量的值（写入 Page 沙箱，回合提交后固化）" }
+func (t *SetVariableTool) Name() string         { return "set_variable" }
+func (t *SetVariableTool) Description() string  { return "设置游戏变量的值（写入 Page 沙箱，回合提交后固化）" }
+func (t *SetVariableTool) ReplaySafety() ReplaySafety { return ReplayConfirmOnReplay }
 func (t *SetVariableTool) Parameters() json.RawMessage {
 	return json.RawMessage(`{
 		"type": "object",
@@ -94,8 +96,9 @@ func NewSearchMemoryTool(sessionID string, memStore *memory.Store) *SearchMemory
 	return &SearchMemoryTool{sessionID: sessionID, memStore: memStore}
 }
 
-func (t *SearchMemoryTool) Name() string        { return "search_memory" }
-func (t *SearchMemoryTool) Description() string { return "在会话记忆中搜索包含关键词的条目（最多返回 5 条）" }
+func (t *SearchMemoryTool) Name() string         { return "search_memory" }
+func (t *SearchMemoryTool) Description() string  { return "在会话记忆中搜索包含关键词的条目（最多返回 5 条）" }
+func (t *SearchMemoryTool) ReplaySafety() ReplaySafety { return ReplaySafe }
 func (t *SearchMemoryTool) Parameters() json.RawMessage {
 	return json.RawMessage(`{
 		"type": "object",

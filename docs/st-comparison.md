@@ -1,218 +1,267 @@
-# WorkshopEngine vs SillyTavern 能力对比
+# WorkshopEngine 能力全景对比
 
-> 编写于 2026-04-04
+> 更新于 2026-04-04（第二版 — 完整 TavernHeadless 架构分析）
 >
-> 分析目的：明确 WorkshopEngine 作为无头运行时的边界，识别引擎层真实缺口，
-> 确定下一步工作方向。
+> 参考源：TavernHeadless monorepo（core / adapters-sillytavern / official-integration-kit）
+> + SillyTavern 功能文档
 
 ---
 
-## 一、比较框架的前提
+## 一、比较框架
 
-SillyTavern 是"前端 + 后端 + 插件生态"的一体化桌面应用，而 WorkshopEngine
-是纯粹的 **无头 API 运行时**。直接比较会产生大量"ST 有 / 引擎没有"的误报。
+三方参与比较：
 
-正确的比较框架是三层分类：
+| 系统 | 定位 |
+|------|------|
+| **SillyTavern（ST）** | 一体化桌面应用（UI + 后端 + 插件生态） |
+| **TavernHeadless（TH）** | 无头 REST API 服务，紧密对齐 ST 数据格式，TypeScript/Fastify |
+| **WorkshopEngine（WE）** | 无头 REST API 运行时，API-first 多租户设计，Go/Gin |
 
-| 类别 | 含义 | 是否引擎责任 |
-|------|------|------------|
-| **超出范围** | 纯前端渲染、桌面 UI、TTS/STT、图像生成集成 | ❌ 客户端层 |
-| **创作/平台层** | 角色卡管理、角色库、标签分类、分享 | 🟡 creation / platform 层 |
-| **引擎层差距** | Prompt 编排、上下文管理、会话结构、AI 后端对接 | ✅ 引擎核心责任 |
-
-以下分析只关注**引擎层差距**。
+本文档聚焦**引擎层**差距。UI 层、TTS/STT、图像生成等客户端功能均超出范围。
 
 ---
 
-## 二、WorkshopEngine 已经具备的引擎能力
+## 二、TavernHeadless 架构速览
 
-| 能力 | ST 实现 | WorkshopEngine 实现 | 优劣 |
-|------|---------|---------------------|------|
-| 会话结构 | 线性 chat history | Session → Floor → Page 三层 | **WE 更强**：支持 Swipe 多页、Fork 平行时间线 |
-| Preset / 作者注释 | Story String + Author's Note | PresetEntry（injection_order + position） | 对等 |
-| 世界书 | WorldInfo（关键词触发，depth/scan） | WorldbookEntry（关键词/正则触发） | ST 有 depth/scan 深度控制，WE 缺这部分 |
-| 记忆系统 | 无原生结构化记忆，依赖插件 | 时间衰减 + 整合 Worker + 维护策略 | **WE 显著更强** |
-| 变量系统 | 无五层沙箱；有 macro 宏替换 | 五层变量沙箱（Page→Floor→Branch→Chat→Global） | **WE 更强** |
-| LLM 采样参数 | Connection Profiles（per-profile 覆盖） | GenParams + ResolveSlot（5 级优先级） | 对等 |
-| Tools / Function Calling | 通过扩展脚本，非原生 | 原生 Agentic Loop（3 内置工具，注册表可扩展） | **WE 更强**（原生） |
+TH 是一个 8 阶段 Turn Orchestrator 驱动的多层系统：
+
+```
+Turn 请求
+  │
+  ├─ 1. transition          Floor 状态机迁移（draft → generating）
+  ├─ 2. director            Director 槽：上下文分析 / 剧情控制指令
+  ├─ 3. tool_setup          工具注册表装载
+  ├─ 4. memory_retrieval    记忆注入准备
+  ├─ 5. generation          LLM 流式生成（Vercel AI SDK）
+  ├─ 6. verifier            Verifier 槽：输出格式/安全校验
+  ├─ 7. memory_consolidation 摘要提取 + 记忆整合（可选异步）
+  └─ 8. commit              事务提交（含重试）
+```
+
+关键架构组件：
+- **PromptAssembler**：加载 Preset + Worldbook（含 trigger 逻辑） + RegexProfile → 组装 PromptIR → 应用 Regex 后处理
+- **ToolRegistry**：4 类 Provider（Builtin / Preset / MCP / Resource）
+- **ResourceToolProvider**：23 个内置资源工具（CRUD: character / worldbook / preset / regex）
+- **Memory V2**：双层摘要（compact + extended）+ MemoryEdge（关系图）+ MemoryScope（范围紧缩）
+- **EventBus**：50+ 事件类型（emittery），供插件/监控消费
+- **Multi-provider**：Vercel AI SDK 抽象（OpenAI、Anthropic、Google、xAI）
+
+---
+
+## 三、逐项对比
+
+### 3.1 会话结构
+
+| 特性 | TH | WE | 评注 |
+|------|----|----|------|
+| Session / Floor / Page 三层 | ✅ sessions / floors / messagePages | ✅ 完整实现 | 对等 |
+| Swipe 多页选择 | ✅ | ✅ `PATCH /floors/:fid/pages/:pid/activate` | 对等 |
+| 会话 Fork / 平行时间线 | ✅ floor branch（按单 Floor 分叉） | ✅ Session Fork（按任意 FloorSeq 复制全段历史） | WE 语义更强（批量分叉） |
+| Floor 实时运行状态追踪 | ✅ FloorRunSnapshot（phase / pendingOutput / verifier） | ❌ | TH 独有，用于前端展示生成进度 |
+| 乐观锁（expectedVersion） | ✅ 所有可变资源更新携带版本号 | ❌ | TH 独有，防并发编辑冲突 |
+| 对话导入/导出（thchat / jsonl） | ✅ ChatTransferJob | ❌ | TH 独有 |
+
+---
+
+### 3.2 Prompt 编排
+
+| 特性 | TH | WE | 评注 |
+|------|----|----|------|
+| System Prompt 模板 | ✅ | ✅ | 对等 |
+| Preset Entry（injection_order / position） | ✅ | ✅ | 对等 |
+| Prompt 格式模板（ChatML / Llama3 / Alpaca 等） | ✅（ST adapter 兼容模式） | ❌ | TH 独有，本地模型必需 |
+| **Regex Profile（可复用规则集）** | ✅ 独立资源（RegexProfile + RegexRule），支持 AI_OUTPUT / USER_INPUT | ❌ | **近期目标** |
+| Prompt Dry-Run（不调用 LLM） | ✅ `POST /prompt/dry-run` | ✅ `GET /sessions/:id/prompt-preview` | 对等 |
+| Prompt 快照（frozen IR，用于调试/重放） | ✅ promptSnapshots 表 | ❌ | TH 独有，可后续补 |
+
+---
+
+### 3.3 世界书（WorldInfo）
+
+| 特性 | TH | WE | 评注 |
+|------|----|----|------|
+| 主关键词触发（primaryKeys） | ✅ | ✅ | 对等 |
+| 正则关键词（`/pattern/flags`） | ✅ | ✅ `regex:` 前缀 | 对等 |
+| **次级关键词 + 逻辑门**（AND_ANY / AND_ALL / NOT_ANY / NOT_ALL） | ✅ | ❌ | **近期目标** |
+| **扫描深度**（scan_depth：只扫最近 N 条消息） | ✅ | ❌ | **近期目标** |
+| **注入位置**（BEFORE_TEMPLATE / AFTER_TEMPLATE / AT_DEPTH） | ✅ | ❌ | **近期目标** |
+| 全词匹配（whole_word） | ✅ | ❌ | 低优先级 |
+| 大小写敏感控制（per-entry） | ✅ | ⚠️ 仅全局 case-insensitive | 低优先级 |
+| 常驻词条（constant） | ✅ | ✅ | 对等 |
+| **递归激活** | ✅ | ❌ | **近期目标** |
+| 互斥分组（group，同组最多激活 N 条） | ✅ | ❌ | 中期 |
+
+---
+
+### 3.4 记忆系统
+
+| 特性 | TH | WE | 评注 |
+|------|----|----|------|
+| 记忆存储 / CRUD | ✅ | ✅ | 对等 |
+| 时间衰减排序 | ❌（按 importance 排序，无显式衰减） | ✅ 指数半衰期 + MinDecayFactor | **WE 更强** |
+| 维护策略（deprecate / purge） | ✅ 生命周期状态机 | ✅ 全局维护 Worker | 对等 |
+| **双层摘要**（compact summary + extended summary） | ✅ Memory V2 | ❌ 仅单层 summary + fact 两种类型 | TH 更完整 |
+| **记忆边（MemoryEdge）** | ✅ 关系图（支持 mutual_implication / contradiction 等） | ❌ | TH 独有，高优先级低 |
+| **记忆范围紧缩（MemoryScope compaction）** | ✅ 可 rebuild 指定范围的记忆 | ❌ | TH 独有 |
+| 异步整合 Worker | ✅ MemoryJob 队列 | ✅ 独立 Worker 进程 | 对等 |
+| 整合触发（N 回合触发） | ✅ | ✅ | 对等 |
+
+---
+
+### 3.5 变量系统
+
+| 特性 | TH | WE | 评注 |
+|------|----|----|------|
+| 五层变量（global / chat / branch / floor / page） | ✅ DB 行存储，按 scope 读写 | ✅ 内存 Sandbox，CommitTurn 后持久化 | 对等（实现不同） |
+| Macro 宏替换（`{{var}}`） | ✅ template-engine.ts | ✅ pipeline/node_template.go | 对等 |
+| **变量批量操作** | ✅ batch PATCH | ❌ 仅单次 PATCH | 小差距 |
+| 变量层级可视化（供前端 inspector 使用） | ✅ client-helpers `flattenVariableSnapshot` | ❌（API 已返回 Flatten，但无分层） | 客户端层 |
+
+---
+
+### 3.6 工具系统（Tools / Function Calling）
+
+| 特性 | TH | WE | 评注 |
+|------|----|----|------|
+| 原生 Agentic Loop | ✅ | ✅（最多 5 轮） | 对等 |
+| **Tool 重放安全分级** | ✅ safe / confirm_on_replay / never_auto_replay / uncertain | ❌ | **今日目标（零成本加入）** |
+| **ResourceToolProvider（23 个资源管理工具）** | ✅ CRUD: character / worldbook / preset / regex | ❌ 仅 3 个内置工具 | 中期目标 |
+| **MCP 协议接入**（stdio + HTTP transport） | ✅ 完整 McpConnectionManager | ❌ | 中期目标 |
+| **Preset 工具（用户自定义工具）** | ✅ PresetToolProvider | ❌ | 中期目标 |
+| 内置工具（变量读写 + 记忆搜索） | ✅（memory builtin） | ✅ get_variable / set_variable / search_memory | 对等 |
+| Tool 执行记录（ToolExecutionRecord） | ✅ DB 持久化 | ❌ 无持久化 | 中期 |
+| Tool 异步/延迟执行（deferred delivery） | ✅ | ❌ 仅同步 | 中期 |
+
+---
+
+### 3.7 LLM 调用层
+
+| 特性 | TH | WE | 评注 |
+|------|----|----|------|
+| OpenAI 兼容 API | ✅ | ✅ | 对等 |
+| **Anthropic / Google / xAI 原生** | ✅ Vercel AI SDK 抽象 | ❌ 仅 OpenAI compat | 中期 |
+| 采样参数（temperature / topP / topK / penalties） | ✅ | ✅ | 对等 |
+| Per-request 参数覆盖 | ✅ | ✅ | 对等 |
+| Profile / Binding 5 级优先级 | ✅ | ✅ ResolveSlot | 对等 |
+| **Director 角色槽**（上下文分析/剧情控制） | ✅ | ❌ | 中期 |
+| **Verifier 角色槽**（输出校验） | ✅ | ❌ | 中期 |
+| 生成队列（fifo / priority / direct） | ✅ | ❌ | 低优先级 |
 | SSE 流式 | ✅ | ✅ | 对等 |
-| 角色卡解析 | TavernCardV2/V3（原生） | PNG 解析（chara_card_v2/v3） | 对等 |
-| Prompt Dry-Run | 无 | `GET /sessions/:id/prompt-preview` | **WE 独有** |
-| 多租户 | 单用户桌面 | X-Account-ID + ALLOW_ANONYMOUS | **WE 更强** |
-| Session Fork | 无（只能复制整个对话） | `POST /sessions/:id/fork`（从任意楼层分叉） | **WE 独有** |
-| LLM 响应结构化解析 | Regex 后处理（非结构化） | XML/JSON/Plaintext 三层回退 → 结构化 `ParsedResponse` | **WE 更强** |
+| **精确 Token 计数**（分词器） | ✅ provider-specific | ❌ 粗估 | **近期目标** |
 
 ---
 
-## 三、SillyTavern 引擎层能力 — WorkshopEngine 缺口
+### 3.8 创作工具
 
-### 🔴 优先级高（直接影响可用性）
-
-#### 3.1 Prompt 格式模板（ChatML / Llama3 / Mistral / Alpaca / 自定义）
-
-ST 支持十余种 chat 模板，把 `[{role: "user", content: "..."}]` 转换为模型原生期望的
-字符串格式（`<|im_start|>user\n...<|im_end|>`）。
-
-WorkshopEngine 目前只做 OpenAI messages 格式，无法对接**不支持标准 chat API 的
-本地模型**（Ollama 原始模式、KoboldAI text-completion、vLLM 部分端点）。
-
-**影响**：本地大模型（Qwen、DeepSeek、Yi 等）如果通过 text-completion 接口而非
-chat-completion 接口暴露，引擎无法对接。
-
-#### 3.2 Regex 脚本 / 输出后处理规则
-
-ST 的 Regex 脚本允许对 AI 输入/输出做任意 find-replace，用途包括：
-- 去除 AI 输出中的前缀套话（"Certainly! As an AI..."）
-- 格式规范化（统一换行、去除星号动作描述）
-- 标签注入（把 AI 输出中特定词汇替换为触发关键词）
-- 隐私过滤
-
-WorkshopEngine 目前在 `parser.go` 只做结构化解析，没有可配置的后处理规则管道。
-
-#### 3.3 精确 Token 计数
-
-ST 使用 tiktoken / HuggingFace 分词器做精确 token 计数，驱动上下文裁剪。
-WorkshopEngine 使用粗估（`1 token ≈ 1.5 汉字`），实际 token 使用量可能大幅偏差。
-
-**影响**：`TOKEN_BUDGET` 边界不准，可能导致上下文溢出或大量浪费。
+| 特性 | TH | WE | 评注 |
+|------|----|----|------|
+| 角色卡（TavernCardV2/V3） | ✅ 解析 + 导入 | ✅ PNG 解析 | 对等 |
+| **角色版本管理（rollback）** | ✅ characterVersions 表 | ❌ | 低优先级 |
+| 素材上传 | ❌（ST 本身管理） | ✅ `/api/v2/assets/:slug/upload` | WE 独有 |
+| Preset Entry CRUD | ✅ | ✅ 含 reorder | 对等 |
+| Worldbook Entry CRUD | ✅ | ✅ | 对等 |
+| **Regex Profile CRUD** | ✅ 独立资源 | ❌ | **近期目标** |
 
 ---
 
-### 🟡 优先级中（影响生态完整性）
+### 3.9 用户与鉴权
 
-#### 3.4 世界书深度控制（depth / scan_depth / position）
-
-ST WorldInfo 每条词条有：
-- `position`：在 prompt 中的插入位置（before char def / after char def / before example messages / at depth N in conversation）
-- `scan_depth`：只扫描最近 N 条消息寻找触发关键词（而不是全文扫描）
-- `group`：多个词条的互斥分组（同组最多触发 N 条）
-
-WorkshopEngine 当前 WorldbookNode 只做全文扫描 + 关键词/正则触发，缺少
-`depth` 扫描窗口和 `position` 精确插入控制。
-
-#### 3.5 递归世界书激活（Recursion）
-
-ST 支持被触发的词条内容本身成为新的关键词扫描源，触发更多词条（可配置递归深度）。
-WorkshopEngine 目前只做单次扫描，无递归。
-
-#### 3.6 服务端事件钩子 / 插件 API
-
-ST 拥有完整的后端插件系统（metadata、事件监听、API 注册）。WorkshopEngine
-没有任何 server-side hook 机制。
-
-没有钩子，就无法构建：
-- 第三方工具接入（SD 图像生成 trigger、TTS 触发）
-- 外部状态同步（接入 Notion、GitHub 等）
-- 自定义 context 变换器
-
-#### 3.7 对话导入 / 导出（SillyTavern JSON 格式）
-
-ST 有完整的 chat export（.jsonl、ST 私有格式）和 import（跨客户端恢复）。
-WorkshopEngine 没有对话序列化接口（只能直接查 DB）。
+| 特性 | TH | WE | 评注 |
+|------|----|----|------|
+| 管理员 API Key | ✅ | ✅ | 对等 |
+| JWT Auth | ✅（auth_mode=jwt） | ❌ | 中期 |
+| 多账户（Multi-Account） | ✅ accounts 表 | ✅ X-Account-ID | 对等（实现不同） |
+| 用户 Persona（accountUsers） | ✅ | ❌ | 低优先级 |
 
 ---
 
-### 🟢 优先级低（边际收益）
+### 3.10 工程基础设施
 
-| 功能 | ST 有 | 备注 |
-|------|-------|------|
-| 多角色群聊（Group Chat） | ✅ | 引擎可以建模（多 session 或单 session 多角色），复杂度高 |
-| Persona 管理（用户角色设定） | ✅ | 可通过 tmplCfg 字段间接实现 |
-| Quick Reply（预设用户消息快捷键） | ✅ | 前端功能，引擎无需实现 |
-| Message 移动 / 编辑历史 | ✅ | 可通过 Pages 覆盖实现，非刚需 |
-| CFG（引导比例） | ✅ | 模型特定，仅部分后端支持 |
-| Character Book 的 key/secondaryKey | ✅ | 可扩展 WorldbookEntry 表 |
-| 角色卡标签 / 分类 | ✅ | 创作层，非引擎层 |
+| 特性 | TH | WE | 评注 |
+|------|----|----|------|
+| OpenAPI 文档自动生成 | ✅ Swagger UI | ❌ | 中期（可用 swaggo） |
+| **Event Bus（50+ 事件类型）** | ✅ emittery | ❌ | 中期（插件/监控基础） |
+| **官方 TypeScript SDK** | ✅ @tavern/sdk + @tavern/client-helpers | ❌ | API 稳定后生成 |
 
 ---
 
-## 四、TavernHeadless 对比 — 我们尚未对齐的部分
+## 四、WorkshopEngine 的差异化优势
 
-TH 作为最接近的参考实现，以下是 TH 已有/规划但 WorkshopEngine 当前未实现的：
-
-| 功能 | TH 状态 | WorkshopEngine 状态 | 差距评估 |
-|------|---------|---------------------|---------|
-| 多 Provider（Anthropic / Google / xAI） | ✅ 完整注册表 | ⚠️ 仅 OpenAI 兼容 | provider.go 框架已存在，需实现各家格式转换 |
-| 完整 JWT / 账户映射 | ✅ | ⚠️ admin key + X-Account-ID | 中期目标，当前单机/小团队够用 |
-| WorldInfo `depth` / `position` | ✅ | ⚠️ 仅全文扫描 | 优先级高 |
-| Regex 预/后处理规则 | ✅ | ❌ | 优先级高 |
-| MCP 协议接入 | 🔄 规划中 | ❌ | Tools 层已建好，MCP 是下一步 |
-| 多 LLM 角色槽（director / verifier） | ✅ | ❌ | 中期目标 |
-| 对话分支导出 | ✅ | ❌ | 中期 |
-| 精确 tokenizer | ⚠️ 部分 | ❌ | 建议用 tiktoken-go 或 API 反馈值 |
-
----
-
-## 五、引擎能做到"完整替代 SillyTavern 全部工作"吗？
-
-**结论：不需要，也不应该。**
-
-ST 是端到端的用户产品（UI + 桌面客户端 + 插件商店）。
-WorkshopEngine 是 **基础设施层**，对应的是 ST 后端 API 的职责，
-而非 ST 整体。
-
-正确的类比关系：
-
-```
-WorkshopEngine          ≈  ST 的 server.js + routes/* + world-info engine
-                           + chat engine + memory (if ST had one)
-
-Creation Layer（待建）  ≈  ST 的角色卡管理 UI + WorldInfo 编辑器
-Platform Layer（待建）  ≈  ST 的扩展商店 + 用户账户系统
-
-WorkshopEngine 暂不覆盖  =  ST 的前端渲染、TTS、STT、SD 集成、扩展 UI 组件
-```
-
-WorkshopEngine 在以下方向上**超越了 ST 的服务端能力**：
-- 结构化三层会话（Floor/Page/Fork）
-- 五层变量沙箱
-- 原生结构化 LLM 响应解析
-- 多租户设计
-- 原生 Agentic Tool Loop
-- 记忆衰减系统
-
-对"有 SillyTavern 插件生态"的需求，正确答案是接入 **MCP 协议**（工具调用标准化），
-而非逐一复现 ST 插件系统的内部 API。
+| 特性 | 描述 |
+|------|------|
+| **PromptBlock 优先级 IR** | 每个节点只产出 Block，Runner 按 Priority 统一排序。TH 是位置式组装，WE 优先级模型更灵活 |
+| **XML/JSON/Plaintext 三层回退解析** | 结构化 ParsedResponse（narrative / options / state_patch / vn）。TH 依赖 LLM 自行格式化 + regex 后处理 |
+| **Session Fork（批量平行时间线）** | 从任意 FloorSeq 复制全段历史创建新 Session。TH 只能从单 Floor 分叉 |
+| **原生 Agentic Tool Loop** | 引擎内置，无需扩展脚本 |
+| **五层 Page 沙箱 + CommitTurn 提升** | 内存级变量隔离，Regen 时自动丢弃 Page 层变化，不污染 Chat 层 |
+| **多租户 API-first 无状态设计** | 无 session cookie / 桌面依赖，天然适合服务端嵌入 |
+| **记忆时间衰减（指数半衰期）** | TH 使用静态 importance 排序，WE 有动态衰减 |
+| **VN Directives（视觉小说指令集）** | LLM 输出 `<vn>` 标签 → 结构化场景指令，TH 无此概念 |
+| **MVM 渲染分层设计** | MODEL/MSG/VIEW 三层分离，前端客户端与引擎解耦 |
 
 ---
 
-## 六、下一步工作方向建议
+## 五、长期工作方向
 
-基于以上分析，推荐按以下优先级推进：
+### 第一阶段：完成 Prompt 编排能力（近期，进行中）
 
-### 第一优先：补全 Prompt 编排能力
+目标：引擎层 Prompt 编排能力完整对齐 TH + ST。
 
-| 任务 | 内容 | 复杂度 |
+| 任务 | 描述 | 复杂度 |
 |------|------|--------|
-| **Regex 后处理规则** | `GameTemplate.Config` 配置 `output_transforms`（find/replace/regex），`parser.go` 后应用 | 低 |
-| **WorldInfo scan_depth + position** | WorldbookEntry 增加 `scan_depth int`、`position string` 字段；node_worldbook.go 按 depth 窗口触发 | 低-中 |
-| **WorldInfo 递归激活** | node_worldbook.go 二次扫描已激活词条内容 | 低 |
+| ✅ **Regex Profile 系统** | `RegexProfile` + `RegexRule` 资源，AI 输出/用户输入后处理 | 低 |
+| ✅ **WorldInfo 次级关键词 + 逻辑门** | AND_ANY / AND_ALL / NOT_ANY / NOT_ALL | 低 |
+| ✅ **WorldInfo scan_depth + position** | 扫描窗口 + 注入位置（before/after/at_depth） | 低-中 |
+| ✅ **WorldInfo 递归激活** | 已激活词条内容再次触发扫描 | 低 |
+| ✅ **Tool ReplaySafety 分级** | safe / confirm_on_replay / never_auto_replay / uncertain | 低 |
+| **精确 Token 计数** | tiktoken-go 或 API 反馈值校准 | 低-中 |
 
-这三项完成后，Prompt 编排能力可以认为**完整覆盖** ST 的同类功能。
+### 第二阶段：工具生态扩展（中期）
 
-### 第二优先：精确 Token 管理
+目标：工具调用覆盖引擎自身资源 + 外部生态接入。
 
-| 任务 | 内容 | 复杂度 |
+| 任务 | 描述 | 复杂度 |
 |------|------|--------|
-| **tiktoken-go 集成** | 引入 `tiktoken-go` 或用 API 返回的 `usage.prompt_tokens` 做反馈校准 | 低-中 |
-| **智能上下文裁剪** | Pipeline Runner 超出预算时优先裁剪低优先级 History Block | 中 |
+| **ResourceToolProvider（创作工具）** | 在工具调用中读写 character / worldbook / preset / regex | 中 |
+| **MCP 协议接入** | McpConnectionManager（stdio + HTTP），McpToolProvider 注册到 Registry | 中 |
+| **用户自定义工具（Preset Tool）** | 通过 API 注册自定义工具定义，运行时动态加载 | 中 |
+| **工具执行持久化** | ToolExecutionRecord 表，支持查询和 replay | 低-中 |
 
-### 第三优先：MCP 协议接入
+### 第三阶段：多 LLM 角色槽（中期）
 
-Tools 层已建好，MCP 是将其标准化的下一步。引擎对外暴露 `/tools/mcp` 端点，
-接受标准 MCP 工具描述，自动注册到 Registry，使任意社区 MCP 服务器的工具
-无需手写适配代码即可在游戏中使用。
+目标：Director + Verifier 槽，构建多 AI 协作管道。
 
-### 中期目标（维持当前节奏）
+| ���务 | 描述 | 复杂度 |
+|------|------|--------|
+| **Director 槽** | generation 前的上下文分析/剧情控制指令（廉价模型） | 中 |
+| **Verifier 槽** | generation 后的输出校验（格式/安全/一致性） | 中 |
+| **多 Provider 注册表** | Anthropic / Google / xAI 原生适配（非 OpenAI compat 路径） | 中 |
 
-```
-多 LLM 角色槽（director / verifier）→ 多 Provider 注册表 → JWT Auth
-```
+### 第四阶段：平台工程（长期）
+
+目标：生态可扩展性和运维可观测性。
+
+| 任务 | 描述 | 复杂度 |
+|------|------|--------|
+| **Event Bus（引擎事件系统）** | 50+ 事件类型（Floor/Memory/Tool/Variable），供监控和 webhook 消费 | 中 |
+| **OpenAPI 文档（swaggo）** | 自动从代码注释生成 Swagger UI | 低 |
+| **官方 TypeScript SDK** | API 冻结后，基于 OpenAPI spec 生成类型 + 封装 resource 方法 | 中 |
+| **JWT + 账户映射** | 标准 JWT 鉴权，账户资源隔离 | 中 |
+| **对话导入/导出** | ST 格式 (.jsonl) + 原生格式互转 | 低 |
 
 ---
 
-## 七、一句话定位
+## 六、一句话定位
 
-> WorkshopEngine 是"比 ST 服务端更有结构的 AI 对话运行时"。
-> 它不复制 ST 的插件生态，而是通过 MCP 标准接入整个工具生态。
-> 它不是 ST 的替代品，而是 ST 想做但受限于单体架构没做成的东西的 API 化版本。
+> WorkshopEngine 不是 SillyTavern 的替代品，
+> 也不试图复制 TavernHeadless 的完整设计。
+>
+> 它是一个**结构更清晰的 API 运行时**：
+> 用 PromptBlock 优先级 IR 代替位置式组装，
+> 用结构化 ParsedResponse 代替正则后处理，
+> 用 Session/Floor/Page 三层 + Fork 代替线性历史，
+> 用内存变量沙箱代替 DB 行级 scope。
+>
+> 差距在于**工具生态**（MCP / ResourceTools）、**多 LLM 角色槽**、
+> 和 **Regex / WorldInfo 编排能力**。
+> 这三个方向是接下来 2 个阶段的核心工作。
