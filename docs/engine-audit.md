@@ -388,18 +388,31 @@ TurnRequest
 - `llm/client.go`：新增 `ToolDefinition`/`ToolCall`/`ToolCallFunction` 类型；`Message` / `Options` / `Response` / `buildBody` / `doChat` / `mergeOpts` 全部扩展支持 function calling
 - `game_loop.go`：主链路替换为 Agentic Tool Loop（最多 5 轮）；`tmplCfg.enabled_tools` 控制按需注册；无工具时单次直通
 
-### 📋 近期目标（精确 Token 计数）
+### ✅ 已完成（第八轮 — ResourceToolProvider）
 
-| 功能 | 复杂度 | 说明 |
-|------|--------|------|
-| **精确 Token 计数（tiktoken-go）** | 低-中 | 替换 `1 token ≈ 1.5 汉字` 粗估；或用 API 响应 `usage.prompt_tokens` 做反馈校准 |
+**ResourceToolProvider（12 个资源工具）**
+- `engine/tools/resource_provider.go`（新文件）：12 个资源工具完整实现
+  - 世界书：`worldbook_search`(safe) / `worldbook_get`(safe) / `worldbook_create`(confirm) / `worldbook_update`(confirm) / `worldbook_delete`(never_auto)
+  - 预设条目：`preset_list`(safe) / `preset_get`(safe) / `preset_update`(confirm)
+  - 游戏模板：`template_info`(safe)
+  - 会话状态：`session_summary`(safe) / `floor_history`(safe)
+  - 记忆：`memory_create`(confirm)
+- `engine/api/game_loop.go`：支持 `"resource:*"` 一次性启用所有资源工具；或在 `enabled_tools` 中单独列名按需注册
+- **零后端代码场景**：设计师在 `GameTemplate.Config.enabled_tools = ["resource:*"]` 后，LLM 即可在游戏回合中 CRUD 世界书/预设/记忆，无需写任何后端代码
+
+### ✅ 已完成（近期目标 — 精确 Token 计数）
+
+- `internal/core/tokenizer/estimate.go`：BPE 兼容启发式（ASCII ÷4，CJK ×⅔），误差 ±15%
+- 替换 `memory/store.go` 和 `engine_methods.go` 中的粗估
 
 ### 📋 中期目标（工具生态 + 多角色槽）
 
 | 功能 | 复杂度 | 价值 |
 |------|--------|------|
+| **ScheduledTurn（自主回合）** | 低-中 | 高 — 定时/压力驱动自动触发 PlayTurn（NPC 不等玩家就发帖）；参考 SocialSim 压力调度器 |
+| **MaterialLibrary + search_material 工具** | 中 | 高 — 预生成内容池；背景 NPC 零 LLM 成本；参考 SocialSim Materials 模块 |
+| **StreamTurn Agentic Loop** | 低 | 中 — StreamTurn 目前不支持工具调用循环；先非流式完成 tool rounds 再流式出最终结果 |
 | **MCP 协议接入** | 中 | 高 — Tools 层已建好，MCP 标准化接入社区工具生态 |
-| **ResourceToolProvider（23 个资源工具）** | 中 | 高 — 在工具调用中 CRUD character / worldbook / preset / regex |
 | **多 LLM 角色槽（director/verifier）** | 中 | 中 — 多 AI 协作；director 剧情控制，verifier 输出校验 |
 | **多 Provider 注册表（Anthropic/Google）** | 中 | 中 — 非 OpenAI compat 路径 |
 | **Auth（JWT + 账户映射）** | 中 | 中 — 当前 admin key + X-Account-ID 足够单机/小团队 |

@@ -92,6 +92,7 @@ func (e *GameEngine) StreamTurn(ctx context.Context, req TurnRequest) (<-chan st
 		var tmplCfg struct {
 			MemoryLabel     string   `json:"memory_label"`
 			FallbackOptions []string `json:"fallback_options"`
+			EnabledTools    []string `json:"enabled_tools"` // 注：StreamTurn 暂不支持 Agentic Loop；工具在此仅作记录
 		}
 		_ = json.Unmarshal(template.Config, &tmplCfg)
 
