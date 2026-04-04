@@ -13,6 +13,7 @@ import (
 	"mvu-backend/internal/engine/pipeline"
 	"mvu-backend/internal/engine/prompt_ir"
 	"mvu-backend/internal/engine/session"
+	"mvu-backend/internal/engine/tools"
 	"mvu-backend/internal/engine/variable"
 	"mvu-backend/internal/platform/provider"
 )
@@ -132,10 +133,11 @@ func (e *GameEngine) PlayTurn(ctx context.Context, req TurnRequest) (*TurnRespon
 	e.db.Where("game_id = ? AND enabled = true", sess.GameID).
 		Order("injection_order ASC").Find(&presetEntries)
 
-	// 解析模板 Config JSONB（memory_label / fallback_options 等可选字段）
+	// 解析模板 Config JSONB（memory_label / fallback_options / enabled_tools 等可选字段）
 	var tmplCfg struct {
 		MemoryLabel     string   `json:"memory_label"`     // 记忆注入标签前缀
 		FallbackOptions []string `json:"fallback_options"` // parser fallback 默认选项
+		EnabledTools    []string `json:"enabled_tools"`    // 启用的工具名列表（空=不启用工具调用）
 	}
 	_ = json.Unmarshal(template.Config, &tmplCfg)
 
@@ -164,6 +166,24 @@ func (e *GameEngine) PlayTurn(ctx context.Context, req TurnRequest) (*TurnRespon
 	var chatVars map[string]any
 	_ = json.Unmarshal(sess.Variables, &chatVars)
 	sb := variable.NewSandbox(nil, chatVars, nil, nil, nil)
+
+	// ── 3b. 初始化工具注册表（按模板 enabled_tools 按需注册）──────
+	toolReg := tools.NewRegistry()
+	if len(tmplCfg.EnabledTools) > 0 {
+		enabled := make(map[string]struct{}, len(tmplCfg.EnabledTools))
+		for _, name := range tmplCfg.EnabledTools {
+			enabled[name] = struct{}{}
+		}
+		if _, ok := enabled["get_variable"]; ok {
+			toolReg.Register(tools.NewGetVariableTool(sb))
+		}
+		if _, ok := enabled["set_variable"]; ok {
+			toolReg.Register(tools.NewSetVariableTool(sb))
+		}
+		if _, ok := enabled["search_memory"]; ok {
+			toolReg.Register(tools.NewSearchMemoryTool(req.SessionID, e.memStore))
+		}
+	}
 
 	// ── 4. 准备记忆摘要（来自异步 Worker 的缓存） ──────────────
 	memorySummary := sess.MemorySummary
@@ -263,11 +283,39 @@ func (e *GameEngine) PlayTurn(ctx context.Context, req TurnRequest) (*TurnRespon
 		client = llm.NewClient(baseURL, req.APIKey, llmOpts.Model, 60, 2)
 	}
 
-	// ── 10. One-Shot LLM 调用（主链路唯一的 LLM 请求）────────
-	llmResp, err := client.Chat(ctx, llmMsgs, llmOpts)
-	if err != nil {
-		_ = e.sessions.FailTurn(floorID, err.Error())
-		return nil, fmt.Errorf("llm: %w", err)
+	// 注入工具定义
+	if defs := toolReg.ToLLMDefinitions(); len(defs) > 0 {
+		llmOpts.Tools = defs
+	}
+
+	// ── 10. Agentic Tool Loop（最多 5 轮，无工具时单次直通）─────
+	const maxToolIter = 5
+	var llmResp *llm.Response
+	for iter := 0; iter < maxToolIter; iter++ {
+		llmResp, err = client.Chat(ctx, llmMsgs, llmOpts)
+		if err != nil {
+			_ = e.sessions.FailTurn(floorID, err.Error())
+			return nil, fmt.Errorf("llm: %w", err)
+		}
+		if len(llmResp.ToolCalls) == 0 {
+			break // LLM 不再请求工具，退出循环
+		}
+		// 追加 assistant 消息（含 tool_calls）
+		llmMsgs = append(llmMsgs, llm.Message{
+			Role:      "assistant",
+			Content:   llmResp.Content,
+			ToolCalls: llmResp.ToolCalls,
+		})
+		// 执行每个工具调用，追加 tool 结果消息
+		for _, tc := range llmResp.ToolCalls {
+			result := toolReg.Execute(ctx, tc.Function.Name, json.RawMessage(tc.Function.Arguments))
+			llmMsgs = append(llmMsgs, llm.Message{
+				Role:       "tool",
+				Content:    result,
+				ToolCallID: tc.ID,
+				Name:       tc.Function.Name,
+			})
+		}
 	}
 
 	// ── 11. 解析 AI 响应（三层回退） ──────────────────────────

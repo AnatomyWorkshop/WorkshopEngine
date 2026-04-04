@@ -12,10 +12,39 @@ import (
 	"time"
 )
 
-// Message OpenAI 兼容消息格式
+// Message OpenAI 兼容消息格式（支持 tool_calls 字段）
 type Message struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role       string     `json:"role"`
+	Content    string     `json:"content"`
+	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string     `json:"tool_call_id,omitempty"` // role=tool 时使用
+	Name       string     `json:"name,omitempty"`         // role=tool 时函数名
+}
+
+// ToolDefinition OpenAI function calling 工具定义
+type ToolDefinition struct {
+	Type     string          `json:"type"` // 固定为 "function"
+	Function ToolFunctionDef `json:"function"`
+}
+
+// ToolFunctionDef 工具函数描述（JSON Schema 参数规范）
+type ToolFunctionDef struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	Parameters  json.RawMessage `json:"parameters"` // JSON Schema object
+}
+
+// ToolCall LLM 回包中的工具调用请求
+type ToolCall struct {
+	ID       string           `json:"id"`
+	Type     string           `json:"type"` // "function"
+	Function ToolCallFunction `json:"function"`
+}
+
+// ToolCallFunction 工具调用的函数名与参数
+type ToolCallFunction struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"` // JSON 字符串
 }
 
 // Options 调用选项（覆盖客户端默认值）。
@@ -40,6 +69,9 @@ type Options struct {
 	ReasoningEffort string   // "low"|"medium"|"high"；空 = 不发送（o1/o3 系列）
 	Stop            []string // 停止序列，nil/空 = 不发送
 
+	// 工具调用（nil = 不发送，不启用 function calling）
+	Tools []ToolDefinition
+
 	// 传输模式（由调用方设置，不开放给用户配置）
 	Stream bool
 }
@@ -53,8 +85,9 @@ type Usage struct {
 
 // Response 非流式响应
 type Response struct {
-	Content string
-	Usage   Usage
+	Content   string
+	ToolCalls []ToolCall // 非空时表示 LLM 请求调用工具；Content 可能为空
+	Usage     Usage
 }
 
 // Client OpenAI 兼容 LLM 客户端
@@ -147,7 +180,8 @@ func (c *Client) doChat(ctx context.Context, body []byte) (*Response, error) {
 	var payload struct {
 		Choices []struct {
 			Message struct {
-				Content string `json:"content"`
+				Content   string     `json:"content"`
+				ToolCalls []ToolCall `json:"tool_calls"`
 			} `json:"message"`
 		} `json:"choices"`
 		Usage Usage `json:"usage"`
@@ -159,8 +193,9 @@ func (c *Client) doChat(ctx context.Context, body []byte) (*Response, error) {
 		return nil, fmt.Errorf("empty choices in response")
 	}
 	return &Response{
-		Content: payload.Choices[0].Message.Content,
-		Usage:   payload.Usage,
+		Content:   payload.Choices[0].Message.Content,
+		ToolCalls: payload.Choices[0].Message.ToolCalls,
+		Usage:     payload.Usage,
 	}, nil
 }
 
@@ -265,6 +300,9 @@ func (c *Client) mergeOpts(req Options) Options {
 	if len(req.Stop) > 0 {
 		merged.Stop = req.Stop
 	}
+	if len(req.Tools) > 0 {
+		merged.Tools = req.Tools
+	}
 	merged.Stream = req.Stream
 	return merged
 }
@@ -299,6 +337,9 @@ func buildBody(opts Options, messages []Message) map[string]any {
 	}
 	if len(opts.Stop) > 0 {
 		m["stop"] = opts.Stop
+	}
+	if len(opts.Tools) > 0 {
+		m["tools"] = opts.Tools
 	}
 	return m
 }
