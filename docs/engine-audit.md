@@ -295,9 +295,12 @@ TurnRequest
 | **Worldbook 正则关键词** | `regex:` 前缀触发正则 | ✅ 已支持（`matchWorldbookKey`） | — |
 | **Memory 时间衰减** | 半衰期指数衰减 + minFactor | ✅ `StoreConfig.HalfLifeDays` + `MinDecayFactor` | — |
 | **Memory 维护策略（deprecate/purge）** | 完整 | ✅ 全局维护 Worker（DeprecateAfterDays + PurgeAfterDays + MaintenanceInterval 独立定时器） | — |
-| **Worker 轮询参数（批次/租约/重试）** | 全部可配置 | ⚠️ 轮询间隔硬编码 | 近期 |
-| **多 Provider 注册表** | 支持 openai/anthropic/google/xai | ⚠️ 仅 openai-compatible | 近期 |
+| **Worker 轮询参数（批次/租约/重试）** | 全部可配置 | ✅ `PollInterval`/`BatchSize`/`MaxConcurrent`/`LeaseTTL` 均可配置 | — |
+| **多 Provider 注册表** | 支持 openai/anthropic/google/xai | ⚠️ 仅 openai-compatible | 中期 |
 | **Auth（JWT / API key 账户映射）** | 完整 | ⚠️ 仅 admin key + X-Account-ID | 中期 |
+| **Tools / Function Calling** | MCP 工具调用 | ❌ 未实现 | 中期 |
+| **多 LLM 角色槽（director/verifier）** | narrator + director + verifier | ❌ 仅 narrator | 中期 |
+| **Session Fork** | 从任意 Floor 分叉新会话 | ❌ 未实现（设计已有） | 中期 |
 | **SSE 流式** | 完整 | ✅ 已实现 | — |
 | **三层消息结构** | Session→Floor→Page | ✅ 完整 | — |
 | **五层变量沙箱** | Page→Floor→Branch→Chat→Global | ✅ 完整 | — |
@@ -358,9 +361,17 @@ TurnRequest
 
 ### ⚠️ 近期目标
 
-（全部核心能力已对齐 TH）
+（全部核心能力已对齐参考实现）
 
-### 📋 中期目标
+### 📋 中期目标（引擎层真实差距）
 
-- Tools / MCP 工具调用（TH 的最大差距）
-- 多 LLM 角色槽扩展：`director`、`verifier`
+| 功能 | 复杂度 | 价值 |
+|------|--------|------|
+| **Session Fork** | 低 | 高 — 从任意 Floor 分叉新会话，存档/平行时间线基础 |
+| **Tools / Function Calling** | 中 | 极高 — 引擎通用化入口，驱动 vibe coding / 项目可视化 |
+| **MCP 协议接入** | 中 | 高 — 复用社区 MCP 服务，Tools 层建成后自然衔接 |
+| **多 LLM 角色槽（director/verifier）** | 中 | 中 — 多 AI 协作；director 控制剧情走向，verifier 校验输出格式 |
+| **多 Provider 注册表（Anthropic/Google）** | 中 | 中 — 非 OpenAI 兼容路径；目前 BYO Key 已覆盖大部分场景 |
+| **Auth（JWT + 账户映射）** | 中 | 中 — 当前 admin key + X-Account-ID 足够单机/小团队 |
+
+设计思路见 [`docs/prompt-block-design.md`](prompt-block-design.md)（PromptBlock 扩展路径 + MVM 分层 + 存档分析）。
