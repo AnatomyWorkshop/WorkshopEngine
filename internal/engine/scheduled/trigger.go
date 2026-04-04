@@ -126,7 +126,15 @@ func (r *TriggerRule) PickInput() string {
 //   - "tension"            → vars["tension"]
 //   - "emotion.tension"    → vars["emotion"].(map)["tension"]
 //   - "npc.夜歌.trust"     → vars["npc"].(map)["夜歌"].(map)["trust"]
+//
+// 注意：优先匹配字面量完整 key（支持 "__sched.r1.last_floor" 这类含点的平键）。
 func GetFloat(vars map[string]any, path string) (float64, bool) {
+	// 先尝试字面量精确匹配（处理含点的平级 key，如 __sched.<id>.last_floor）
+	if v, ok := vars[path]; ok {
+		if f, ok2 := toFloat(v); ok2 {
+			return f, true
+		}
+	}
 	dot := strings.IndexByte(path, '.')
 	if dot < 0 {
 		// 叶子节点：直接转换

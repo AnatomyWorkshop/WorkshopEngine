@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -213,6 +214,7 @@ func RegisterCreationRoutes(rg *gin.RouterGroup, db *gorm.DB) {
 	registerLLMProfileRoutes(create, db)
 	registerPresetEntryRoutes(create, db)
 	registerRegexProfileRoutes(create, db)
+	registerMaterialRoutes(create, db)
 }
 
 // registerLLMProfileRoutes 注册 LLM 配置 CRUD 路由（/api/v2/create/llm-profiles/...）
@@ -713,6 +715,123 @@ func registerRegexProfileRoutes(rg *gin.RouterGroup, db *gorm.DB) {
 		var list []dbmodels.RegexRule
 		db.Where("profile_id = ?", c.Param("pid")).Order("\"order\" ASC").Find(&list)
 		c.JSON(http.StatusOK, gin.H{"code": 0, "data": list})
+	})
+}
+
+// registerMaterialRoutes 注册素材库接口（/templates/:id/materials/...）
+func registerMaterialRoutes(rg *gin.RouterGroup, db *gorm.DB) {
+	mat := rg.Group("/templates/:id/materials")
+
+	// POST — 新建素材条目
+	mat.POST("", func(c *gin.Context) {
+		var m dbmodels.Material
+		if err := c.ShouldBindJSON(&m); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		m.GameID = c.Param("id")
+		if m.Tags == nil {
+			m.Tags, _ = json.Marshal([]string{})
+		}
+		if m.WorldTags == nil {
+			m.WorldTags, _ = json.Marshal([]string{})
+		}
+		if err := db.Create(&m).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"code": 0, "data": m})
+	})
+
+	// GET — 列出素材（?type=&mood=&style=&function_tag=&enabled=&limit=&offset=）
+	mat.GET("", func(c *gin.Context) {
+		q := db.Where("game_id = ?", c.Param("id"))
+		if t := c.Query("type"); t != "" {
+			q = q.Where("type = ?", t)
+		}
+		if mood := c.Query("mood"); mood != "" {
+			q = q.Where("mood = ?", mood)
+		}
+		if style := c.Query("style"); style != "" {
+			q = q.Where("style = ?", style)
+		}
+		if ft := c.Query("function_tag"); ft != "" {
+			q = q.Where("function_tag = ?", ft)
+		}
+		if c.Query("enabled") == "true" {
+			q = q.Where("enabled = true")
+		} else if c.Query("enabled") == "false" {
+			q = q.Where("enabled = false")
+		}
+		limit := 50
+		offset := 0
+		if v := c.Query("limit"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				limit = n
+			}
+		}
+		if v := c.Query("offset"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+				offset = n
+			}
+		}
+		var list []dbmodels.Material
+		q.Order("created_at DESC").Limit(limit).Offset(offset).Find(&list)
+		c.JSON(http.StatusOK, gin.H{"code": 0, "data": list})
+	})
+
+	// PATCH /:mid — 更新素材字段
+	mat.PATCH("/:mid", func(c *gin.Context) {
+		var updates map[string]any
+		if err := c.ShouldBindJSON(&updates); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		delete(updates, "game_id")
+		delete(updates, "id")
+		if err := db.Model(&dbmodels.Material{}).
+			Where("id = ? AND game_id = ?", c.Param("mid"), c.Param("id")).
+			Updates(updates).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		var m dbmodels.Material
+		db.First(&m, "id = ?", c.Param("mid"))
+		c.JSON(http.StatusOK, gin.H{"code": 0, "data": m})
+	})
+
+	// DELETE /:mid — 删除素材
+	mat.DELETE("/:mid", func(c *gin.Context) {
+		if err := db.Where("id = ? AND game_id = ?", c.Param("mid"), c.Param("id")).
+			Delete(&dbmodels.Material{}).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"code": 0, "data": gin.H{"deleted": true}})
+	})
+
+	// POST /batch — 批量导入素材（[]Material）
+	mat.POST("/batch", func(c *gin.Context) {
+		var items []dbmodels.Material
+		if err := c.ShouldBindJSON(&items); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		gameID := c.Param("id")
+		for i := range items {
+			items[i].GameID = gameID
+			if items[i].Tags == nil {
+				items[i].Tags, _ = json.Marshal([]string{})
+			}
+			if items[i].WorldTags == nil {
+				items[i].WorldTags, _ = json.Marshal([]string{})
+			}
+		}
+		if err := db.Create(&items).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"code": 0, "data": gin.H{"created": len(items)}})
 	})
 }
 

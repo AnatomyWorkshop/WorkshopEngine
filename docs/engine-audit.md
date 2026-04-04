@@ -435,13 +435,56 @@ TurnRequest
 - `internal/core/tokenizer/estimate.go`：BPE 兼容启发式（ASCII ÷4，CJK ×⅔），误差 ±15%
 - 替换 `memory/store.go` 和 `engine_methods.go` 中的粗估
 
+### ✅ 已完成（Round 11 — MaterialLibrary + search_material 工具）
+
+**素材库**：游戏设计师预先准备大量文本素材（发帖体 / 对话片段 / 氛围描写 / 世界事件），LLM 通过 `search_material` 工具按标签/情绪/风格检索匹配条目，实现"零 LLM 成本 Tier3 内容生成"。
+
+新增文件 / 改动：
+
+- `internal/core/db/models.go`：新增 `Material` 模型（ID / GameID / Type / Content / Tags / WorldTags / Mood / Style / FunctionTag / UsedCount / Enabled），使用 `datatypes.JSON` 存储 JSONB 标签数组
+- `internal/core/db/connect.go`：AutoMigrate 追加 `&Material{}`
+- `internal/creation/api/routes.go`：新增 `registerMaterialRoutes(create, db)` 函数，挂载于 `/api/v2/create/templates/:id/materials`：
+  - `POST /` — 创建单条素材
+  - `GET /` — 列表查询（支持 type / mood / style / function_tag / enabled / limit / offset 过滤）
+  - `PATCH /:mid` — 更新素材字段
+  - `DELETE /:mid` — 删除素材
+  - `POST /batch` — 批量导入（`[]Material` 数组，适合初始化内容池）
+- `internal/engine/tools/material_tool.go`：`SearchMaterialTool`（`search_material` 工具）
+  - JSONB 标签检索：`tags ?| array(...)` OR `world_tags ?| array(...)` — 任意标签命中即返回
+  - 支持 type / mood / style / function_tag 精确过滤
+  - limit 参数（默认 5，最大 20），按 `used_count ASC` 排序（优先返回使用频率低的素材）
+  - 异步递增 `used_count`（不阻塞响应）
+  - ReplaySafety = `safe`（只读 + 异步副作用）
+- `internal/engine/api/game_loop.go` + `engine_methods.go`：在 `enabled_tools` 解析块中注册 `"search_material"` → `SearchMaterialTool(e.db, sess.GameID, req.SessionID)`
+
+**游戏配置示例**（在 `GameTemplate.Config.enabled_tools` 中启用）：
+
+```json
+{
+  "enabled_tools": ["search_material"],
+  "scheduled_turns": [...]
+}
+```
+
+**素材检索工具调用示例**（LLM 在工具循环中调用）：
+
+```json
+{ "name": "search_material", "arguments": { "tags": ["恐惧", "黑暗"], "mood": "tense", "limit": 3 } }
+```
+
+返回：
+
+```json
+{ "found": true, "items": [{ "id": "...", "type": "atmosphere", "content": "黑暗中有什么东西在动..." }] }
+```
+
 ### 📋 中期目标（工具生态 + 多角色槽）
 
 | 功能 | 复杂度 | 价值 |
 |------|--------|------|
+| ✅ **MaterialLibrary + search_material 工具** | 中 | 高 — 预生成内容池；背景 NPC 零 LLM 成本；已实现 Material CRUD + JSONB 标签检索 |
+| ✅ **StreamTurn Agentic Loop** | 低 | 中 — StreamTurn 现已支持工具调用循环；先非流式完成 tool rounds 再流式出最终结果 |
 | **ScheduledTurn 定时模式**（后台 goroutine + SSE 推送） | 中 | 高 — 玩家不操作时 NPC 自主发帖；MVP 已完成后置检查模式，定时模式依赖 SSE 架构 |
-| **MaterialLibrary + search_material 工具** | 中 | 高 — 预生成内容池；背景 NPC 零 LLM 成本；参考 SocialSim Materials 模块 |
-| **StreamTurn Agentic Loop** | 低 | 中 — StreamTurn 目前不支持工具调用循环；先非流式完成 tool rounds 再流式出最终结果 |
 | **MCP 协议接入** | 中 | 高 — Tools 层已建好，MCP 标准化接入社区工具生态 |
 | **多 LLM 角色槽（director/verifier）** | 中 | 中 — 多 AI 协作；director 剧情控制，verifier 输出校验 |
 | **多 Provider 注册表（Anthropic/Google）** | 中 | 中 — 非 OpenAI compat 路径 |

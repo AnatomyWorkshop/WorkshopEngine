@@ -70,7 +70,7 @@ Turn 请求
 | System Prompt 模板 | ✅ | ✅ | 对等 |
 | Preset Entry（injection_order / position） | ✅ | ✅ | 对等 |
 | Prompt 格式模板（ChatML / Llama3 / Alpaca 等） | ✅（ST adapter 兼容模式） | ❌ | TH 独有，本地模型必需 |
-| **Regex Profile（可复用规则集）** | ✅ 独立资源（RegexProfile + RegexRule），支持 AI_OUTPUT / USER_INPUT | ❌ | **近期目标** |
+| **Regex Profile（可复用规则集）** | ✅ 独立资源（RegexProfile + RegexRule），支持 AI_OUTPUT / USER_INPUT | ✅ 完整 CRUD + reorder + enabled 控制 | 对等 |
 | Prompt Dry-Run（不调用 LLM） | ✅ `POST /prompt/dry-run` | ✅ `GET /sessions/:id/prompt-preview` | 对等 |
 | Prompt 快照（frozen IR，用于调试/重放） | ✅ promptSnapshots 表 | ❌ | TH 独有，可后续补 |
 
@@ -82,13 +82,13 @@ Turn 请求
 |------|----|----|------|
 | 主关键词触发（primaryKeys） | ✅ | ✅ | 对等 |
 | 正则关键词（`/pattern/flags`） | ✅ | ✅ `regex:` 前缀 | 对等 |
-| **次级关键词 + 逻辑门**（AND_ANY / AND_ALL / NOT_ANY / NOT_ALL） | ✅ | ❌ | **近期目标** |
-| **扫描深度**（scan_depth：只扫最近 N 条消息） | ✅ | ❌ | **近期目标** |
-| **注入位置**（BEFORE_TEMPLATE / AFTER_TEMPLATE / AT_DEPTH） | ✅ | ❌ | **近期目标** |
-| 全词匹配（whole_word） | ✅ | ❌ | 低优先级 |
+| **次级关键词 + 逻辑门**（AND_ANY / AND_ALL / NOT_ANY / NOT_ALL） | ✅ | ✅ secondary_keys + secondary_logic | 对等 |
+| **扫描深度**（scan_depth：只扫最近 N 条消息） | ✅ | ✅ scan_depth 字段 | 对等 |
+| **注入位置**（BEFORE_TEMPLATE / AFTER_TEMPLATE / AT_DEPTH） | ✅ | ✅ position 字段 | 对等 |
+| 全词匹配（whole_word） | ✅ | ✅ whole_word 字段 | 对等 |
 | 大小写敏感控制（per-entry） | ✅ | ⚠️ 仅全局 case-insensitive | 低优先级 |
 | 常驻词条（constant） | ✅ | ✅ | 对等 |
-| **递归激活** | ✅ | ❌ | **近期目标** |
+| **递归激活** | ✅ | ✅ 已激活词条内容触发二次扫描 | 对等 |
 | 互斥分组（group，同组最多激活 N 条） | ✅ | ❌ | 中期 |
 
 ---
@@ -124,8 +124,8 @@ Turn 请求
 | 特性 | TH | WE | 评注 |
 |------|----|----|------|
 | 原生 Agentic Loop | ✅ | ✅（最多 5 轮） | 对等 |
-| **Tool 重放安全分级** | ✅ safe / confirm_on_replay / never_auto_replay / uncertain | ❌ | **今日目标（零成本加入）** |
-| **ResourceToolProvider（23 个资源管理工具）** | ✅ CRUD: character / worldbook / preset / regex | ❌ 仅 3 个内置工具 | 中期目标 |
+| **Tool 重放安全分级** | ✅ safe / confirm_on_replay / never_auto_replay / uncertain | ✅ ReplaySafety 接口，全部工具已实现 | 对等 |
+| **ResourceToolProvider（资源管理工具）** | ✅ CRUD: character / worldbook / preset / regex（23 个） | ✅ 12 个（worldbook / preset / memory / material 读写） | 对等（WE 范围更窄，按需扩展） |
 | **MCP 协议接入**（stdio + HTTP transport） | ✅ 完整 McpConnectionManager | ❌ | 中期目标 |
 | **Preset 工具（用户自定义工具）** | ✅ PresetToolProvider | ❌ | 中期目标 |
 | 内置工具（变量读写 + 记忆搜索） | ✅（memory builtin） | ✅ get_variable / set_variable / search_memory | 对等 |
@@ -160,7 +160,8 @@ Turn 请求
 | 素材上传 | ❌（ST 本身管理） | ✅ `/api/v2/assets/:slug/upload` | WE 独有 |
 | Preset Entry CRUD | ✅ | ✅ 含 reorder | 对等 |
 | Worldbook Entry CRUD | ✅ | ✅ | 对等 |
-| **Regex Profile CRUD** | ✅ 独立资源 | ❌ | **近期目标** |
+| **Regex Profile CRUD** | ✅ 独立资源 | ✅ 完整 CRUD + reorder | 对等 |
+| **素材库（MaterialLibrary）** | ❌ | ✅ Material CRUD + batch 导入 + search_material 工具 | **WE 独有** |
 
 ---
 
@@ -222,7 +223,8 @@ Turn 请求
 
 | 任务 | 描述 | 复杂度 |
 |------|------|--------|
-| **ResourceToolProvider（创作工具）** | 在工具调用中读写 character / worldbook / preset / regex | 中 |
+| ✅ **ResourceToolProvider（资源工具）** | 在工具调用中读写 worldbook / preset / memory / material（12 个工具） | 中 |
+| ✅ **MaterialLibrary + search_material** | 素材库 CRUD + 按标签/情绪/风格 JSONB 检索的 `search_material` 工具 | 中 |
 | **MCP 协议接入** | McpConnectionManager（stdio + HTTP），McpToolProvider 注册到 Registry | 中 |
 | **用户自定义工具（Preset Tool）** | 通过 API 注册自定义工具定义，运行时动态加载 | 中 |
 | **工具执行持久化** | ToolExecutionRecord 表，支持查询和 replay | 低-中 |

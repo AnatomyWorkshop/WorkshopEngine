@@ -199,6 +199,9 @@ func (e *GameEngine) PlayTurn(ctx context.Context, req TurnRequest) (*TurnRespon
 		if _, ok := enabled["search_memory"]; ok {
 			toolReg.Register(tools.NewSearchMemoryTool(req.SessionID, e.memStore))
 		}
+		if _, ok := enabled["search_material"]; ok {
+			toolReg.Register(tools.NewSearchMaterialTool(e.db, sess.GameID, req.SessionID))
+		}
 		// "resource:*" 一次性启用所有 12 个资源工具；也可以单独列出工具名按需注册
 		if _, ok := enabled["resource:*"]; ok {
 			for _, t := range tools.NewResourceToolProvider(e.db, sess.GameID, req.SessionID, e.memStore) {

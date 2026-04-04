@@ -42,5 +42,7 @@ func migrate(db *gorm.DB) error {
 		// Regex 后处理系统
 		&RegexProfile{},
 		&RegexRule{},
+		// 素材库
+		&Material{},
 	)
 }
