@@ -359,19 +359,33 @@ TurnRequest
 - `prompt_ir/pipeline.go`：`GameConfig` 加入 `MemoryLabel` 和 `FallbackOptions`
 - `engine/api/game_loop.go`：从模板 Config JSONB 解析 `memory_label` / `fallback_options` 并注入管道
 
-### ⚠️ 近期目标
+### ✅ 已完成（第六轮 — Tools / Function Calling）
 
-（全部核心能力已对齐参考实现）
+- `internal/engine/tools/registry.go`：`Tool` 接口 + `Registry`（Register、Execute、ToLLMDefinitions）
+- `internal/engine/tools/builtins.go`：三个内置工具（`get_variable`、`set_variable`、`search_memory`）
+- `llm/client.go`：新增 `ToolDefinition`/`ToolCall`/`ToolCallFunction` 类型；`Message` / `Options` / `Response` / `buildBody` / `doChat` / `mergeOpts` 全部扩展支持 function calling
+- `game_loop.go`：主链路替换为 Agentic Tool Loop（最多 5 轮）；`tmplCfg.enabled_tools` 控制按需注册；无工具时单次直通
+
+### 📋 近期目标（Prompt 编排补全 — 对齐 SillyTavern 同类能力）
+
+详细对比分析见 [`docs/st-comparison.md`](st-comparison.md)。
+
+| 功能 | 复杂度 | 价值 | 说明 |
+|------|--------|------|------|
+| **Regex 输出后处理规则** | 低 | 高 — 去除套话、格式规范化、标签注入 | `tmplCfg.output_transforms`，parser 后应用 |
+| **WorldInfo scan_depth + position** | 低-中 | 高 — 精确控制词条插入位置和扫描窗口 | WorldbookEntry 增加 `scan_depth`/`position`；node_worldbook 按深度触发 |
+| **WorldInfo 递归激活** | 低 | 中 — 已激活词条内容再触发新词条 | node_worldbook 二次扫描，可配置最大递归深度 |
+| **精确 Token 计数（tiktoken-go）** | 低-中 | 高 — 当前粗估误差大，影响上下文裁剪准确性 | 替换 `1 token ≈ 1.5 汉字` 估算 |
 
 ### 📋 中期目标（引擎层真实差距）
 
 | 功能 | 复杂度 | 价值 |
 |------|--------|------|
-| **Session Fork** | 低 | 高 — 从任意 Floor 分叉新会话，存档/平行时间线基础 |
-| **Tools / Function Calling** | 中 | 极高 — 引擎通用化入口，驱动 vibe coding / 项目可视化 |
-| **MCP 协议接入** | 中 | 高 — 复用社区 MCP 服务，Tools 层建成后自然衔接 |
+| **MCP 协议接入** | 中 | 高 — Tools 层已建好，MCP 使任意社区工具无需手写适配即可注册 |
 | **多 LLM 角色槽（director/verifier）** | 中 | 中 — 多 AI 协作；director 控制剧情走向，verifier 校验输出格式 |
 | **多 Provider 注册表（Anthropic/Google）** | 中 | 中 — 非 OpenAI 兼容路径；目前 BYO Key 已覆盖大部分场景 |
 | **Auth（JWT + 账户映射）** | 中 | 中 — 当前 admin key + X-Account-ID 足够单机/小团队 |
+| **对话导入/导出（ST JSON 格式）** | 低 | 中 — 跨客户端迁移对话历史 |
 
 设计思路见 [`docs/prompt-block-design.md`](prompt-block-design.md)（PromptBlock 扩展路径 + MVM 分层 + 存档分析）。
+能力边界分析见 [`docs/st-comparison.md`](st-comparison.md)（ST vs WorkshopEngine 全面对比）。
