@@ -300,7 +300,7 @@ TurnRequest
 | **Auth（JWT / API key 账户映射）** | 完整 | ⚠️ 仅 admin key + X-Account-ID | 中期 |
 | **Tools / Function Calling** | MCP 工具调用 | ❌ 未实现 | 中期 |
 | **多 LLM 角色槽（director/verifier）** | narrator + director + verifier | ❌ 仅 narrator | 中期 |
-| **Session Fork** | 从任意 Floor 分叉新会话 | ❌ 未实现（设计已有） | 中期 |
+| **Session Fork** | 从任意 Floor 分叉新会话 | ✅ `POST /sessions/:id/fork`（事务复制 Floor/Page，变量快照继承） | — |
 | **SSE 流式** | 完整 | ✅ 已实现 | — |
 | **三层消息结构** | Session→Floor→Page | ✅ 完整 | — |
 | **五层变量沙箱** | Page→Floor→Branch→Chat→Global | ✅ 完整 | — |

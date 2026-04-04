@@ -257,6 +257,22 @@ func RegisterGameRoutes(rg *gin.RouterGroup, engine *GameEngine) {
 		c.JSON(http.StatusOK, gin.H{"code": 0, "data": gin.H{"consolidated": true}})
 	})
 
+	// POST /sessions/:id/fork — 从指定楼层分叉出新会话（平行时间线 / 存档点）
+	// Body: { "from_floor_seq": 5 }（省略 = 复制全部楼层）
+	play.POST("/sessions/:id/fork", func(c *gin.Context) {
+		var req ForkSessionReq
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		newSessID, err := engine.ForkSession(c.Request.Context(), c.Param("id"), req)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"code": 0, "data": gin.H{"session_id": newSessID}})
+	})
+
 	// GET /sessions/:id/prompt-preview — Prompt dry-run（不调用 LLM，供创作者调试）
 	play.GET("/sessions/:id/prompt-preview", func(c *gin.Context) {
 		preview, err := engine.PromptPreview(c.Request.Context(), c.Param("id"), c.Query("input"))

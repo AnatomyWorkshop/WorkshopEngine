@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"unicode/utf8"
 
+	"gorm.io/gorm"
 	dbmodels "mvu-backend/internal/core/db"
 	"mvu-backend/internal/core/llm"
 	"mvu-backend/internal/engine/parser"
@@ -287,6 +288,115 @@ func (e *GameEngine) DeleteSession(ctx context.Context, sessionID string) error 
 		return fmt.Errorf("delete session: %w", err)
 	}
 	return nil
+}
+
+// ── Session Fork ───────────────────────────────────────────────────────────────
+
+// ForkSessionReq POST /sessions/:id/fork 请求体
+type ForkSessionReq struct {
+	// 复制到哪个楼层序号（含）。
+	// nil = 复制全部已提交楼层；0 = 不复制任何楼层（空历史分叉，相当于同模板新会话）。
+	FromFloorSeq *int   `json:"from_floor_seq"`
+	UserID       string `json:"user_id"` // 可选：覆盖新 session 的用户 ID
+}
+
+// ForkSession 从源会话指定楼层分叉出新会话（平行时间线 / 存档点）。
+//
+// 新会话继承源会话的 game_id 和 MemorySummary 缓存，
+// 并复制 [1..from_floor_seq] 的 Floor/Page 历史与变量快照；
+// 从 from_floor_seq+1 楼开始走新方向，不影响源会话。
+func (e *GameEngine) ForkSession(_ context.Context, sourceID string, req ForkSessionReq) (string, error) {
+	// 1. 加载源 Session
+	var src dbmodels.GameSession
+	if err := e.db.First(&src, "id = ?", sourceID).Error; err != nil {
+		return "", fmt.Errorf("source session not found: %w", err)
+	}
+
+	// 2. 查询要复制的楼层（只复制已提交的）
+	q := e.db.Where("session_id = ? AND status = ?", sourceID, dbmodels.FloorCommitted).
+		Order("seq ASC")
+	if req.FromFloorSeq != nil {
+		q = q.Where("seq <= ?", *req.FromFloorSeq)
+	}
+	var floors []dbmodels.Floor
+	if err := q.Find(&floors).Error; err != nil {
+		return "", fmt.Errorf("list source floors: %w", err)
+	}
+
+	// 3. 确定新 Session 的初始变量
+	// CommitTurn 将 sb.Flatten()（全量变量）写入 PageVars，
+	// 所以最后一个复制楼层的激活页 PageVars 就是该楼层提交后的完整变量快照。
+	initVars := []byte("{}")
+	if len(floors) > 0 {
+		var lastPage dbmodels.MessagePage
+		if err := e.db.Where("floor_id = ? AND is_active = true", floors[len(floors)-1].ID).
+			First(&lastPage).Error; err == nil {
+			initVars = lastPage.PageVars
+		}
+	}
+
+	// 4. 确定基础字段
+	userID := src.UserID
+	if req.UserID != "" {
+		userID = req.UserID
+	}
+	title := src.Title
+	if title != "" {
+		title += " (fork)"
+	} else {
+		title = "Fork"
+	}
+
+	// 5. 事务内创建新 Session + 复制 Floor/Page
+	var newSessID string
+	err := e.db.Transaction(func(tx *gorm.DB) error {
+		newSess := dbmodels.GameSession{
+			GameID:        src.GameID,
+			UserID:        userID,
+			Title:         title,
+			MemorySummary: src.MemorySummary,
+			Variables:     initVars,
+			FloorCount:    len(floors),
+		}
+		if err := tx.Create(&newSess).Error; err != nil {
+			return fmt.Errorf("create session: %w", err)
+		}
+		newSessID = newSess.ID
+
+		for _, floor := range floors {
+			// 只复制激活页（is_active = true）
+			var srcPage dbmodels.MessagePage
+			if err := tx.Where("floor_id = ? AND is_active = true", floor.ID).
+				First(&srcPage).Error; err != nil {
+				continue // 无激活页，跳过本楼
+			}
+
+			newFloor := dbmodels.Floor{
+				SessionID: newSessID,
+				Seq:       floor.Seq,
+				Status:    dbmodels.FloorCommitted,
+			}
+			if err := tx.Create(&newFloor).Error; err != nil {
+				return fmt.Errorf("create floor seq=%d: %w", floor.Seq, err)
+			}
+
+			newPage := dbmodels.MessagePage{
+				FloorID:   newFloor.ID,
+				IsActive:  true,
+				Messages:  srcPage.Messages,
+				PageVars:  srcPage.PageVars,
+				TokenUsed: srcPage.TokenUsed,
+			}
+			if err := tx.Create(&newPage).Error; err != nil {
+				return fmt.Errorf("create page for floor seq=%d: %w", floor.Seq, err)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	return newSessID, nil
 }
 
 // PatchVariables 合并更新会话的 Chat 级变量
