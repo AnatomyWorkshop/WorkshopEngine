@@ -163,6 +163,16 @@ func (e *GameEngine) StreamTurn(ctx context.Context, req TurnRequest) (<-chan st
 					}
 				}
 			}
+			// preset:* 或 preset:<name> — 加载创作者自定义 HTTP 回调工具
+			var presetTools []dbmodels.PresetTool
+			e.db.Where("game_id = ? AND enabled = true", sess.GameID).Find(&presetTools)
+			for _, pt := range presetTools {
+				_, allOk := enabled["preset:*"]
+				_, nameOk := enabled["preset:"+pt.Name]
+				if allOk || nameOk {
+					toolReg.Register(tools.NewHttpCallTool(pt, req.SessionID))
+				}
+			}
 		}
 
 		// ── 5. 转换 WorldbookEntry / PresetEntry / Regex → IR ─────
@@ -295,7 +305,9 @@ func (e *GameEngine) StreamTurn(ctx context.Context, req TurnRequest) (<-chan st
 				ToolCalls: toolResp.ToolCalls,
 			})
 			for _, tc := range toolResp.ToolCalls {
-				result := toolReg.Execute(ctx, tc.Function.Name, json.RawMessage(tc.Function.Arguments))
+				toolCtx := context.WithValue(ctx, tools.CtxFloorID, floorID)
+				result := toolReg.ExecuteAndRecord(toolCtx, tc.Function.Name, json.RawMessage(tc.Function.Arguments),
+					tools.ToolRecord{SessionID: req.SessionID, FloorID: floorID, PageID: pageID}, e.db)
 				llmMsgs = append(llmMsgs, llm.Message{
 					Role:       "tool",
 					Content:    result,
@@ -308,9 +320,10 @@ func (e *GameEngine) StreamTurn(ctx context.Context, req TurnRequest) (<-chan st
 		llmOpts.Tools = nil
 
 		// ── 10b. 流式输出最终 LLM 回复 ───────────────────────────
-		streamCh, streamErrCh := client.ChatStream(ctx, llmMsgs, llmOpts)
+		streamCh, usageCh, streamErrCh := client.ChatStream(ctx, llmMsgs, llmOpts)
 
 		var fullContent string
+		// 工具调用轮次已消耗的 token（若有）
 		var tokenUsed int
 		if toolResp != nil {
 			tokenUsed = toolResp.Usage.TotalTokens
@@ -341,6 +354,10 @@ func (e *GameEngine) StreamTurn(ctx context.Context, req TurnRequest) (<-chan st
 				_ = e.sessions.FailTurn(floorID, "context cancelled")
 				return
 			}
+		}
+		// 读取流式 usage（provider 在最后一帧返回；若为 0 则保留工具轮次的值）
+		if u, ok := <-usageCh; ok && u.TotalTokens > 0 {
+			tokenUsed = u.TotalTokens
 		}
 
 		// ── 11. 解析 AI 响应 + regex 后处理 ──────────────────────

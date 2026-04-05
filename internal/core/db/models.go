@@ -252,8 +252,39 @@ type RegexRule struct {
 	CreatedAt   time.Time `json:"created_at"`
 }
 
+// PresetTool 创作者自定义工具（HTTP 回调执行，动态注入 Agentic Loop）。
+//
+// 引擎收到 LLM tool_call 后，向 Endpoint POST {session_id, floor_id, args}，
+// 期望响应 {"result": "..."} 或任意 JSON（直接作为 tool message 内容）。
+type PresetTool struct {
+	ID          string         `gorm:"primaryKey;type:uuid;default:gen_random_uuid()" json:"id"`
+	GameID      string         `gorm:"not null;index"                                  json:"game_id"`
+	Name        string         `gorm:"not null"                                        json:"name"`        // LLM 调用时的工具名（per-game 唯一）
+	Description string         `gorm:"type:text"                                       json:"description"` // 注入 LLM 的工具描述
+	Parameters  datatypes.JSON `gorm:"type:jsonb;default:'{}'"                         json:"parameters"`  // JSON Schema object
+	Endpoint    string         `gorm:"not null"                                        json:"endpoint"`    // HTTP POST URL
+	TimeoutMs   int            `gorm:"default:5000"                                    json:"timeout_ms"`
+	Enabled     bool           `gorm:"default:true"                                    json:"enabled"`
+	CreatedAt   time.Time      `json:"created_at"`
+	UpdatedAt   time.Time      `json:"updated_at"`
+}
+
 // Material 素材库条目（游戏级内容池）。
 //
+// ToolExecutionRecord 记录 Agentic Loop 中每次工具调用的入参、出参和耗时。
+// 用于审计、调试和 replay 决策（结合 ReplaySafety 等级）。
+type ToolExecutionRecord struct {
+	ID         string    `gorm:"primaryKey;type:uuid;default:gen_random_uuid()" json:"id"`
+	SessionID  string    `gorm:"not null;index"                                 json:"session_id"`
+	FloorID    string    `gorm:"not null;index"                                 json:"floor_id"`
+	PageID     string    `gorm:"not null;index"                                 json:"page_id"`
+	ToolName   string    `gorm:"not null"                                       json:"tool_name"`
+	Params     string    `gorm:"type:text"                                      json:"params"`      // JSON 字符串
+	Result     string    `gorm:"type:text"                                      json:"result"`      // JSON 字符串
+	DurationMs int64     `json:"duration_ms"`
+	CreatedAt  time.Time `json:"created_at"`
+}
+
 // 设计初衷：游戏设计师预先准备大量文本内容（发帖体、对话片段、氛围描写等），
 // 引擎通过 search_material 工具按标签/情绪/风格检索匹配条目，
 // 注入当前回合 LLM 上下文，实现"素材库驱动的 Tier3 NPC 内容生成"。

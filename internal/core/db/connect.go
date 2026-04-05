@@ -44,5 +44,9 @@ func migrate(db *gorm.DB) error {
 		&RegexRule{},
 		// 素材库
 		&Material{},
+		// 工具执行记录
+		&ToolExecutionRecord{},
+		// 用户自定义工具
+		&PresetTool{},
 	)
 }

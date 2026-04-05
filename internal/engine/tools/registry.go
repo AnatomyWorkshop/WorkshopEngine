@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
+	"gorm.io/gorm"
 	"mvu-backend/internal/core/llm"
 )
 
@@ -85,4 +87,29 @@ func (r *Registry) ReplaySafetyOf(name string) ReplaySafety {
 		return t.ReplaySafety()
 	}
 	return ReplayUncertain
+}
+
+// ToolRecord 工具执行记录（写入 DB 的最小字段集）。
+type ToolRecord struct {
+	SessionID string
+	FloorID   string
+	PageID    string
+}
+
+// ExecuteAndRecord 执行工具并异步持久化执行记录。
+// db 为 nil 时退化为普通 Execute（不记录）。
+func (r *Registry) ExecuteAndRecord(ctx context.Context, name string, params json.RawMessage, rec ToolRecord, db *gorm.DB) string {
+	start := time.Now()
+	result := r.Execute(ctx, name, params)
+	if db == nil {
+		return result
+	}
+	durationMs := time.Since(start).Milliseconds()
+	go func() {
+		db.Exec(
+			`INSERT INTO tool_execution_records (session_id, floor_id, page_id, tool_name, params, result, duration_ms, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			rec.SessionID, rec.FloorID, rec.PageID, name, string(params), result, durationMs, time.Now(),
+		)
+	}()
+	return result
 }

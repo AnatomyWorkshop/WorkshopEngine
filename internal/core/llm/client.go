@@ -200,22 +200,27 @@ func (c *Client) doChat(ctx context.Context, body []byte) (*Response, error) {
 }
 
 // ChatStream SSE 流式调用（供前端打字动画）
-// 返回一个 channel，调用者持续读取 token 碎片，channel 关闭表示完成
-func (c *Client) ChatStream(ctx context.Context, messages []Message, opts Options) (<-chan string, <-chan error) {
+// 返回三个 channel：token 碎片、Usage（流结束时推送一次）、error
+func (c *Client) ChatStream(ctx context.Context, messages []Message, opts Options) (<-chan string, <-chan Usage, <-chan error) {
 	tokenCh := make(chan string, 64)
+	usageCh := make(chan Usage, 1)
 	errCh := make(chan error, 1)
 
 	merged := c.mergeOpts(opts)
 	merged.Stream = true
 
-	body, _ := json.Marshal(buildBody(merged, messages))
+	// 请求 usage 统计（OpenAI/DeepSeek 支持 stream_options）
+	body := buildBody(merged, messages)
+	body["stream_options"] = map[string]any{"include_usage": true}
+	bodyBytes, _ := json.Marshal(body)
 
 	go func() {
 		defer close(tokenCh)
+		defer close(usageCh)
 		defer close(errCh)
 
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-			c.baseURL+"/chat/completions", bytes.NewReader(body))
+			c.baseURL+"/chat/completions", bytes.NewReader(bodyBytes))
 		if err != nil {
 			errCh <- err
 			return
@@ -231,6 +236,7 @@ func (c *Client) ChatStream(ctx context.Context, messages []Message, opts Option
 		}
 		defer resp.Body.Close()
 
+		var finalUsage Usage
 		scanner := bufio.NewScanner(resp.Body)
 		for scanner.Scan() {
 			line := scanner.Text()
@@ -239,7 +245,7 @@ func (c *Client) ChatStream(ctx context.Context, messages []Message, opts Option
 			}
 			data := strings.TrimPrefix(line, "data: ")
 			if data == "[DONE]" {
-				return
+				break
 			}
 			var chunk struct {
 				Choices []struct {
@@ -247,9 +253,13 @@ func (c *Client) ChatStream(ctx context.Context, messages []Message, opts Option
 						Content string `json:"content"`
 					} `json:"delta"`
 				} `json:"choices"`
+				Usage *Usage `json:"usage"`
 			}
 			if err := json.Unmarshal([]byte(data), &chunk); err != nil {
 				continue
+			}
+			if chunk.Usage != nil && chunk.Usage.TotalTokens > 0 {
+				finalUsage = *chunk.Usage
 			}
 			if len(chunk.Choices) > 0 && chunk.Choices[0].Delta.Content != "" {
 				select {
@@ -259,9 +269,10 @@ func (c *Client) ChatStream(ctx context.Context, messages []Message, opts Option
 				}
 			}
 		}
+		usageCh <- finalUsage
 	}()
 
-	return tokenCh, errCh
+	return tokenCh, usageCh, errCh
 }
 
 // ── 内部工具 ─────────────────────────────────────────────

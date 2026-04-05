@@ -214,6 +214,16 @@ func (e *GameEngine) PlayTurn(ctx context.Context, req TurnRequest) (*TurnRespon
 				}
 			}
 		}
+		// preset:* 或 preset:<name> — 加载创作者自定义 HTTP 回调工具
+		var presetTools []dbmodels.PresetTool
+		e.db.Where("game_id = ? AND enabled = true", sess.GameID).Find(&presetTools)
+		for _, pt := range presetTools {
+			_, allOk := enabled["preset:*"]
+			_, nameOk := enabled["preset:"+pt.Name]
+			if allOk || nameOk {
+				toolReg.Register(tools.NewHttpCallTool(pt, req.SessionID))
+			}
+		}
 	}
 
 	// ── 4. 准备记忆摘要（来自异步 Worker 的缓存） ──────────────
@@ -360,7 +370,9 @@ func (e *GameEngine) PlayTurn(ctx context.Context, req TurnRequest) (*TurnRespon
 		})
 		// 执行每个工具调用，追加 tool 结果消息
 		for _, tc := range llmResp.ToolCalls {
-			result := toolReg.Execute(ctx, tc.Function.Name, json.RawMessage(tc.Function.Arguments))
+			toolCtx := context.WithValue(ctx, tools.CtxFloorID, floorID)
+			result := toolReg.ExecuteAndRecord(toolCtx, tc.Function.Name, json.RawMessage(tc.Function.Arguments),
+				tools.ToolRecord{SessionID: req.SessionID, FloorID: floorID, PageID: pageID}, e.db)
 			llmMsgs = append(llmMsgs, llm.Message{
 				Role:       "tool",
 				Content:    result,

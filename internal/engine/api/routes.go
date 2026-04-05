@@ -7,6 +7,7 @@ import (
 	"strconv"
 
 	"github.com/gin-gonic/gin"
+	dbmodels "mvu-backend/internal/core/db"
 )
 
 // RegisterGameRoutes 注册游玩层接口（/api/v2/play/...）
@@ -291,5 +292,24 @@ func RegisterGameRoutes(rg *gin.RouterGroup, engine *GameEngine) {
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"code": 0, "data": preview})
+	})
+
+	// GET /sessions/:id/tool-executions — 查询工具执行记录
+	play.GET("/sessions/:id/tool-executions", func(c *gin.Context) {
+		query := engine.db.Model(&dbmodels.ToolExecutionRecord{}).
+			Where("session_id = ?", c.Param("id")).
+			Order("created_at DESC")
+		if floorID := c.Query("floor_id"); floorID != "" {
+			query = query.Where("floor_id = ?", floorID)
+		}
+		limit := 50
+		if l := c.Query("limit"); l != "" {
+			if n, err := strconv.Atoi(l); err == nil && n > 0 {
+				limit = n
+			}
+		}
+		var records []dbmodels.ToolExecutionRecord
+		query.Limit(limit).Find(&records)
+		c.JSON(http.StatusOK, gin.H{"code": 0, "data": records})
 	})
 }

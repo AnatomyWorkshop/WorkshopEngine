@@ -11,6 +11,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"gorm.io/datatypes"
 	"gorm.io/gorm"
 	dbmodels "mvu-backend/internal/core/db"
 	"mvu-backend/internal/creation/card"
@@ -215,6 +216,7 @@ func RegisterCreationRoutes(rg *gin.RouterGroup, db *gorm.DB) {
 	registerPresetEntryRoutes(create, db)
 	registerRegexProfileRoutes(create, db)
 	registerMaterialRoutes(create, db)
+	registerPresetToolRoutes(create, db)
 }
 
 // registerLLMProfileRoutes 注册 LLM 配置 CRUD 路由（/api/v2/create/llm-profiles/...）
@@ -543,6 +545,78 @@ func registerPresetEntryRoutes(rg *gin.RouterGroup, db *gorm.DB) {
 		var entries []dbmodels.PresetEntry
 		db.Where("game_id = ?", gameID).Order("injection_order ASC").Find(&entries)
 		c.JSON(http.StatusOK, gin.H{"code": 0, "data": entries})
+	})
+}
+
+// registerPresetToolRoutes 注册 Preset Tool CRUD 路由（/api/v2/create/templates/:id/tools）
+func registerPresetToolRoutes(rg *gin.RouterGroup, db *gorm.DB) {
+	pt := rg.Group("/templates/:id/tools")
+
+	pt.GET("", func(c *gin.Context) {
+		var list []dbmodels.PresetTool
+		db.Where("game_id = ?", c.Param("id")).Order("created_at ASC").Find(&list)
+		c.JSON(http.StatusOK, gin.H{"code": 0, "data": list})
+	})
+
+	pt.POST("", func(c *gin.Context) {
+		var body struct {
+			Name        string          `json:"name"        binding:"required"`
+			Description string          `json:"description"`
+			Parameters  json.RawMessage `json:"parameters"`
+			Endpoint    string          `json:"endpoint"    binding:"required"`
+			TimeoutMs   int             `json:"timeout_ms"`
+			Enabled     *bool           `json:"enabled"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		params := body.Parameters
+		if len(params) == 0 {
+			params = json.RawMessage(`{"type":"object","properties":{}}`)
+		}
+		tool := dbmodels.PresetTool{
+			GameID:      c.Param("id"),
+			Name:        body.Name,
+			Description: body.Description,
+			Parameters:  datatypes.JSON(params),
+			Endpoint:    body.Endpoint,
+			TimeoutMs:   orInt(&body.TimeoutMs, 5000),
+			Enabled:     body.Enabled == nil || *body.Enabled,
+		}
+		if err := db.Create(&tool).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"code": 0, "data": tool})
+	})
+
+	pt.PATCH("/:tid", func(c *gin.Context) {
+		var updates map[string]any
+		if err := c.ShouldBindJSON(&updates); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		delete(updates, "id")
+		delete(updates, "game_id")
+		if err := db.Model(&dbmodels.PresetTool{}).
+			Where("id = ? AND game_id = ?", c.Param("tid"), c.Param("id")).
+			Updates(updates).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		var tool dbmodels.PresetTool
+		db.Where("id = ? AND game_id = ?", c.Param("tid"), c.Param("id")).First(&tool)
+		c.JSON(http.StatusOK, gin.H{"code": 0, "data": tool})
+	})
+
+	pt.DELETE("/:tid", func(c *gin.Context) {
+		if err := db.Where("id = ? AND game_id = ?", c.Param("tid"), c.Param("id")).
+			Delete(&dbmodels.PresetTool{}).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"code": 0, "data": gin.H{"id": c.Param("tid"), "deleted": true}})
 	})
 }
 
