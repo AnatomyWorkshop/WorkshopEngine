@@ -125,6 +125,7 @@ func (e *GameEngine) StreamTurn(ctx context.Context, req TurnRequest) (<-chan st
 			FallbackOptions []string                `json:"fallback_options"`
 			EnabledTools    []string                `json:"enabled_tools"`
 			ScheduledTurns  []scheduled.TriggerRule `json:"scheduled_turns"`
+			DirectorPrompt  string                  `json:"director_prompt"`
 		}
 		_ = json.Unmarshal(template.Config, &tmplCfg)
 
@@ -278,6 +279,24 @@ func (e *GameEngine) StreamTurn(ctx context.Context, req TurnRequest) (<-chan st
 		var llmMsgs []llm.Message
 		for _, m := range finalMessages {
 			llmMsgs = append(llmMsgs, llm.Message{Role: m["role"], Content: m["content"]})
+		}
+
+		// ── Director 槽（可选，廉价模型预分析）────────────────────────
+		if dirClient, dirOpts, ok := func() (*llm.Client, llm.Options, bool) {
+			if e.registry == nil {
+				return nil, llm.Options{}, false
+			}
+			c, o, ok := e.registry.ResolveForSlot(e.db, sess.UserID, req.SessionID, "director")
+			return c, o, ok
+		}(); ok {
+			dirPrompt := tmplCfg.DirectorPrompt
+			if dirPrompt == "" {
+				dirPrompt = "分析当前对话上下文，用一段简短的中文指导下一步叙事方向，不超过100字。"
+			}
+			dirMsgs := append(llmMsgs, llm.Message{Role: "user", Content: dirPrompt})
+			if dirResp, err := dirClient.Chat(ctx, dirMsgs, dirOpts); err == nil && dirResp.Content != "" {
+				llmMsgs = append([]llm.Message{{Role: "system", Content: "[Director] " + dirResp.Content}}, llmMsgs...)
+			}
 		}
 
 		// 注入工具定义

@@ -150,10 +150,11 @@ func (e *GameEngine) PlayTurn(ctx context.Context, req TurnRequest) (*TurnRespon
 
 	// 解析模板 Config JSONB（memory_label / fallback_options / enabled_tools 等可选字段）
 	var tmplCfg struct {
-		MemoryLabel     string                   `json:"memory_label"`     // 记忆注入标签前缀
-		FallbackOptions []string                 `json:"fallback_options"` // parser fallback 默认选项
-		EnabledTools    []string                 `json:"enabled_tools"`    // 启用的工具名列表（空=不启用工具调用）
-		ScheduledTurns  []scheduled.TriggerRule  `json:"scheduled_turns"`  // 自动回合触发规则
+		MemoryLabel     string                  `json:"memory_label"`
+		FallbackOptions []string                `json:"fallback_options"`
+		EnabledTools    []string                `json:"enabled_tools"`
+		ScheduledTurns  []scheduled.TriggerRule `json:"scheduled_turns"`
+		DirectorPrompt  string                  `json:"director_prompt"` // 可选，Director 槽的分析指令
 	}
 	_ = json.Unmarshal(template.Config, &tmplCfg)
 
@@ -334,6 +335,27 @@ func (e *GameEngine) PlayTurn(ctx context.Context, req TurnRequest) (*TurnRespon
 	var llmMsgs []llm.Message
 	for _, m := range finalMessages {
 		llmMsgs = append(llmMsgs, llm.Message{Role: m["role"], Content: m["content"]})
+	}
+
+	// ── 9b. Director 槽（可选，廉价模型预分析）────────────────────
+	// 若创作者为 "director" slot 绑定了 LLM Profile，则在主生成前调用一次，
+	// 把分析结果作为额外 system 消息插入 llmMsgs 首位。
+	// Director 失败不阻断回合，静默跳过。
+	if dirClient, dirOpts, ok := func() (*llm.Client, llm.Options, bool) {
+		if e.registry == nil {
+			return nil, llm.Options{}, false
+		}
+		c, o, ok := e.registry.ResolveForSlot(e.db, sess.UserID, req.SessionID, "director")
+		return c, o, ok
+	}(); ok {
+		dirPrompt := tmplCfg.DirectorPrompt
+		if dirPrompt == "" {
+			dirPrompt = "分析当前对话上下文，用一段简短的中文指导下一步叙事方向，不超过100字。"
+		}
+		dirMsgs := append(llmMsgs, llm.Message{Role: "user", Content: dirPrompt})
+		if dirResp, err := dirClient.Chat(ctx, dirMsgs, dirOpts); err == nil && dirResp.Content != "" {
+			llmMsgs = append([]llm.Message{{Role: "system", Content: "[Director] " + dirResp.Content}}, llmMsgs...)
+		}
 	}
 
 	// 如果前端提供了自定义 key / baseURL，临时构建一个新客户端
