@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # .test/run.sh — Run unit tests + integration tests against DeepSeek API
-# Usage: bash .test/run.sh  (from backend-v2 root)
-#        or: cd .test && bash run.sh
+# Usage: bash .test/run.sh      (from backend-v2 root)
+#        cd .test && bash run.sh
 
 set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -14,16 +14,9 @@ if [ -f "$SCRIPT_DIR/.env" ]; then
   set +a
 fi
 
-echo "=== Unit Tests ==="
+echo "=== Unit Tests (backend-v2/testutil) ==="
 cd "$ROOT"
-go test \
-  ./internal/core/tokenizer/... \
-  ./internal/engine/parser/... \
-  ./internal/engine/processor/... \
-  ./internal/engine/scheduled/... \
-  ./internal/engine/variable/... \
-  ./internal/engine/pipeline/... \
-  -v -count=1
+go test ./testutil/... -v -count=1
 
 echo ""
 echo "=== Integration Tests (DeepSeek API) ==="

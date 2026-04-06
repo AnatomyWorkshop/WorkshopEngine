@@ -1,7 +1,7 @@
 # backend-v2 中期实现计划
 
 > 原则：深度解耦、One-Shot LLM、每个节点对外有明确接口
-> 状态更新：2026-04-06
+> 状态更新：2026-04-06（Phase 3 重排：新增变量门控 + 分阶段记忆标签，Session 分支移后）
 
 ---
 
@@ -118,11 +118,57 @@ POST            /materials/batch                批量导入素材
 Group 为空的词条不参与裁剪，常驻词条不受影响。
 创作层 CRUD 自动透传（直接绑定 DB 结构体），ST 导入适配 `group`/`groupWeight` 字段。
 
-#### 3-D  Session 内分支（branch_id）
-**为什么做：** 当前 ForkSession 创建新 Session，平行时间线游玩体验割裂（两个存档互不关联）。
-与 TH 对比：TH M13 `Floor.branch_id` 支持同会话多时间线，`GET /sessions/:id/branches` 列出所有分支。
+#### ~~3-D  Worldbook 变量门控（`var:` 语法）~~ ✅ 2026-04-06 完成
 
-具体工作：
+`matchKey` 新增 `var:` 前缀识别，支持三种形式：
+- `var:key=value` — 变量等值条件（引擎层强制，与扫描文本无关）
+- `var:key!=value` — 不等条件
+- `var:key` — 变量存在且非空
+
+`matches` 和 `matchKey` 签名新增 `vars map[string]any` 参数，从 `ctx.Variables` 传入。
+无 schema 变更，无 API 变更。典型用法：`"keys": ["var:game_stage=confrontation"]`。
+
+---
+
+#### 3-E  Memory 分阶段标签（stage_tags）
+
+**为什么做：** 多幕式叙事中，前期调查线索/红鲱鱼条目在后期剧情中持续占用 token 并干扰 LLM。需要让创作者为 Memory 条目打上阶段标签，引擎在注入时按当前阶段过滤，实现"LLM 只看当前阶段需要的记忆"。
+
+**与 TH 对比：** TH 无此设计，`GetForInjection` 全量注入所有非废弃记忆。
+
+**具体工作：**
+1. `Memory` 新增 `StageTags datatypes.JSON`（JSONB，`default:'[]'`，存 `[]string`）
+2. `GetForInjection(sessionID, tokenBudget, currentStage string)` 新增过滤：
+   - `stage_tags = '[]'` 的条目无阶段限制，始终注入
+   - `stage_tags @> '["current_stage"]'` 的条目只在匹配阶段注入
+3. `currentStage` 来源：`ctx.Variables["game_stage"]`，由引擎在调用前读取；为空时不过滤（兼容不使用分阶段的游戏）
+4. Memory CRUD API（`POST/PATCH /sessions/:id/memories`）支持 `stage_tags` 字段读写
+5. `applyStructuredResult` 可从 `facts_add` 的可选字段 `stage` 中读取标签，自动打标（无则留空）
+
+**改动量：** DB 迁移 + `store.go` 约 30 行 + API 透传约 10 行，共约 50 行。
+
+---
+
+#### 3-F  边界归档 API
+
+**为什么做：** 游戏结束 / 分享时需要一个结构化摘要，让后续游玩或论坛帖子有上下文。Karpathy LLM Wiki 分析（`karpathy-llmwiki-analysis.md`）指出：好的发现不应该消失在对话历史里，应该归档回知识库。
+
+**与 TH 对比：** TH 有 `ChatTransferJob`（部分等价），WE 无此 API。
+
+**具体工作：**
+1. `POST /sessions/:id/archive`：调用廉价模型（Memory 槽）生成结构化 Markdown 摘要（主线事件 + 关键事实 + 当前变量快照）
+2. 摘要写入 `importance=1.5`（高重要性）的 Memory，同时更新 `session.status = "archived"`
+3. 响应体直接返回 Markdown 文本，供 GW 论坛帖子使用
+
+---
+
+#### 3-G  Session 内分支（branch_id）
+
+**为什么做：** 当前 ForkSession 创建新 Session，平行时间线游玩体验割裂（两个存档互不关联）。
+
+**与 TH 对比：** TH M13 `Floor.branch_id` 支持同会话多时间线，`GET /sessions/:id/branches` 列出所有分支。
+
+**具体工作：**
 1. `Floor` 新增 `BranchID string`（默认 `"main"`）
 2. `session.Manager` 的 `StartTurn` 接受可选 `branchID` 参数；`GetHistory` 按 `branch_id` 过滤楼层
 3. 新增路由：
@@ -131,18 +177,15 @@ Group 为空的词条不参与裁剪，常驻词条不受影响。
    - `DELETE /sessions/:id/branches/:bid`：删除分支（保护 main）
 4. `ForkSession` 保留为跨 Session 存档，`branch` 为 Session 内时间线
 
-#### 3-E  边界归档 API
-**为什么做：** 游戏结束 / 分享时需要一个结构化摘要，让后续游玩或论坛帖子有上下文。
-与 TH 对比：TH 有 `ChatTransferJob`（部分等价），WE 无此 API。
+> **注意**：这是 Phase 3 改动量最大的项（涉及 Floor 读写全链路），排在新增的 3-D/E/F 之后进行。
 
-具体工作：
-1. `POST /sessions/:id/archive`：调用廉价模型生成结构化 Markdown 摘要（主线事件 + 关键事实 + 当前变量快照）
-2. 摘要写入 `importance=1.5`（高重要性）的 Memory，同时更新 `session.status = "archived"`
-3. 响应体直接返回 Markdown 文本，供 GW 论坛帖子使用
+---
 
-#### 3-F  MCP 协议接入（暂缓，候选）
+#### 3-H  MCP 协议接入（暂缓，候选）
+
 **为什么暂缓：** MCP 工具需要稳定的外部进程管理（stdio），在当前轻量 goroutine 架构下实现复杂度较高，且现有 Preset Tool（HTTP 回调）已能覆盖大多数集成场景。
-与 TH 对比：TH M（MCP 集成） 有完整的 `McpConnectionManager` + 12 个 API 端点。WE 暂时用 Preset Tool 替代。
+
+**与 TH 对比：** TH M（MCP 集成） 有完整的 `McpConnectionManager` + 12 个 API 端点。WE 暂时用 Preset Tool 替代。
 
 **触发条件**：当创作者需要接入本地 MCP 工具（如文件系统、代码执行）时再实现；云端 HTTP MCP 可直接用 Preset Tool。
 
@@ -187,9 +230,11 @@ ST 格式（.jsonl）互转，供玩家备份存档或在 ST 和 WE 之间迁移
 | 任务 | 描述 |
 |------|------|
 | **VN 渲染引擎（前端）** | rich 类型游戏的立绘/背景图/BGM/选项 directive 解析；backend 已输出 VNDirectives |
+| **Preflight Rendering（预飞渲染）** | 主回合完成后异步预测下一轮 3 个选项（lazy：仅选项文本；eager：完整预生成 3 条分支回答），缓存至 Session 变量；前端零等待点选。由 `GameTemplate.Config.preflight_mode` 控制（lazy/eager/off）。参见 talk-with-alice 第一篇 Q2。 |
 | **MVM 渲染层** | 游记从游玩片段导出，按 vn-full/narrative/minimal/pure-text 降级渲染 |
 | **创作层 AI 工具补全** | creation-agent 工具扩展：package_game / unpack_game / edit_preset_entry |
 | **论坛/社区层** | GW 的帖子/游记/评论 API，与 WE 游玩层解耦 |
+| **玩家专属进化世界书** | 边界归档时，将本局衍生的新世界书条目写入玩家专属 Memory（`type=worldbook_evolution`），下局开始时作为高优先级词条注入，形成每个玩家独属的"故事沉淀层" |
 
 ---
 
@@ -219,22 +264,25 @@ ST 格式（.jsonl）互转，供玩家备份存档或在 ST 和 WE 之间迁移
 
 ### WE 计划做（Phase 3 / 4）
 
-| TH 功能 | WE 计划 | 预期阶段 |
+| TH 功能 / 设计需求 | WE 计划 | 预期阶段 |
 |---------|---------|---------|
-| memory_edge（关系图） | 3-A | Phase 3 |
-| LLM 模型发现 + 连通性测试 | 3-B | Phase 3 |
-| Worldbook 互斥分组（group） | 3-C | Phase 3 |
-| Session 内 branch_id | 3-D | Phase 3 |
+| ~~memory_edge（关系图）~~ | ~~3-A~~ ✅ | Phase 3 |
+| ~~LLM 模型发现 + 连通性测试~~ | ~~3-B~~ ✅ | Phase 3 |
+| ~~Worldbook 互斥分组（group）~~ | ~~3-C~~ ✅ | Phase 3 |
+| ~~Worldbook 变量门控（`var:` 语法）~~ | ~~3-D~~ ✅ | Phase 3 |
+| Memory 分阶段标签（stage_tags） | 3-E | Phase 3 |
+| 边界归档 API | 3-F | Phase 3 |
+| Session 内 branch_id | 3-G | Phase 3 |
 | API Key AES-256-GCM 加密 | 4-A | Phase 4 |
 | JWT Auth | 4-B | Phase 4 |
-| MCP 协议接入 | 3-F（暂缓） | Phase 3 候选 |
+| MCP 协议接入 | 3-H（暂缓） | Phase 3 候选 |
 | 多 Provider 原生适配 | 4-C | Phase 4 |
 | OpenAPI 文档（Swagger） | 4-D | Phase 4 |
 | 对话导入/导出（ST JSONL） | 4-E | Phase 4 |
 
 ### WE 明确不做（定位不同 / 成本收益不足）
 
-| TH 功能 | 不做原因 |
+| TH / 其他引擎功能 | 不做原因 |
 |---------|---------|
 | **Character 版本管理（rollback）** | WE 用游戏包版本控制游戏内容，角色卡跟随游戏包迭代；不需要 session pin 到角色版本 |
 | **Background Job Runtime（DB 持久化 job 表）** | 当前 goroutine + in-memory lease 对 WE 场景够用；引入 DB job 表增加运维复杂度，收益不足 |
@@ -244,6 +292,8 @@ ST 格式（.jsonl）互转，供玩家备份存档或在 ST 和 WE 之间迁移
 | **记忆维护 CLI（dry-run 脚本）** | WE 有 `POST /sessions/:id/memories/consolidate` API 触发，CLI 工具对当前部署方式意义不大 |
 | **OpenAPI 中英文文档站（VitePress）** | 面向创作者的文档是 CW 的职责，WE 引擎只需要 Swagger UI 供开发联调 |
 | **真实 provider 最小回归 CI 脚本** | WE 用手动冒烟 + `.env` 覆盖；TH 的自动化回归脚本适合其 monorepo + CI 场景 |
+| **WebGal 式 KV + 状态机（确定性数值系统）** | WebGal 的 KV + 快照重算适合严格规则型跑团（COC/DND 战斗公式）；WE 面向开放叙事，数值精确性不是核心需求。精确数值计算的折中方案：用 Director 槽计算，Narrator 槽叙事渲染，两者分工。 |
+| **真正的实时多人联机（Room/分布式状态）** | 需要 WebSocket + 分布式锁 + conflict resolution，架构复杂度极高。WE 的四种轻量多人模式（旁观/轮流/异步论坛/观众投票）已能覆盖叙事游戏的多人需求，无需完整 MMO 基础设施。 |
 
 ---
 
@@ -260,12 +310,16 @@ ST 格式（.jsonl）互转，供玩家备份存档或在 ST 和 WE 之间迁移
 - ReplaySafety 等级（safe / confirm_on_replay / never_auto_replay / uncertain）
 - PromptSnapshot（命中词条 ID + preset_hits + verifier 结果）
 - 结构化 Memory 整合（JSON facts + fact_key upsert/deprecate）
+- **Memory Edge 关系图**（updates/contradicts/supports/resolves，✅ 3-A 完成）
+- **LLM 模型发现 + 连通性测试**（DiscoverModels / TestConnection，✅ 3-B 完成）
+- **Worldbook 互斥分组**（Group + GroupWeight + applyGroupCap，✅ 3-C 完成）
 
-### 待学习
-- **memory_edge 表**：TH M21 `applyConsolidation` 写入 `updates` 边；WE Phase 3-A 目标。
-- **Session branch_id**：TH M13 分支治理完整实现；WE Phase 3-D 目标。
-- **LLM 模型发现**：TH M20 `POST /llm-profiles/models/discover`；WE Phase 3-B 目标。
-- **AES-256-GCM 密钥加密**：TH M18 LLM Profile Vault；WE Phase 4-A 目标。
+### 待学习 / 待实现
+- **Worldbook 变量门控**：`var:key=value` 条件激活语法，引擎层强制阶段门控（3-D）
+- **Memory 分阶段标签**：`stage_tags` 过滤注入，多幕叙事 token 精确控制（3-E）
+- **边界归档**：`POST /sessions/:id/archive`，结局时固化关键记忆（3-F）
+- **Session branch_id**：TH M13 分支治理完整实现；WE Phase 3-G（改动较大，排后）
+- **AES-256-GCM 密钥加密**：TH M18 LLM Profile Vault；WE Phase 4-A
 
 ---
 

@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"fmt"
 	"regexp"
 	"sort"
 	"strings"
@@ -70,7 +71,7 @@ func (n *WorldbookNode) Process(ctx *prompt_ir.ContextData) error {
 			text = buildScanText(msgs, entry.ScanDepth)
 		}
 
-		if n.matches(text, entry) {
+		if n.matches(text, entry, ctx.Variables) {
 			activated = append(activated, entry)
 			activatedIDs[entry.ID] = true
 		} else {
@@ -92,7 +93,7 @@ func (n *WorldbookNode) Process(ctx *prompt_ir.ContextData) error {
 			if !entry.Enabled || entry.Constant {
 				continue
 			}
-			if n.matches(recText, entry) {
+			if n.matches(recText, entry, ctx.Variables) {
 				activated = append(activated, entry)
 			}
 		}
@@ -124,11 +125,11 @@ func (n *WorldbookNode) Process(ctx *prompt_ir.ContextData) error {
 }
 
 // matches 检查扫描文本是否满足词条的完整触发条件（主关键词 + 次级关键词逻辑门）。
-func (n *WorldbookNode) matches(text string, entry prompt_ir.WorldbookEntry) bool {
+func (n *WorldbookNode) matches(text string, entry prompt_ir.WorldbookEntry, vars map[string]any) bool {
 	// 主关键词：任意一条匹配
 	primaryOK := false
 	for _, key := range entry.Keys {
-		if matchKey(text, key, entry.WholeWord) {
+		if matchKey(text, key, entry.WholeWord, vars) {
 			primaryOK = true
 			break
 		}
@@ -149,7 +150,7 @@ func (n *WorldbookNode) matches(text string, entry prompt_ir.WorldbookEntry) boo
 
 	hits := 0
 	for _, key := range entry.SecondaryKeys {
-		if matchKey(text, key, entry.WholeWord) {
+		if matchKey(text, key, entry.WholeWord, vars) {
 			hits++
 		}
 	}
@@ -186,9 +187,35 @@ func buildScanText(msgs []prompt_ir.Message, depth int) string {
 // matchKey 检查单条关键词是否命中。
 //
 // 格式支持：
+//   - "var:key=value"  — 变量等值条件（vars["key"] == "value"）；引擎层强制门控，与扫描文本无关
+//   - "var:key!=value" — 变量不等条件
+//   - "var:key"        — 变量存在且非空
 //   - "regex:<pattern>" — Go regexp，自动加 (?i)；出错降级为字面量
 //   - 普通字符串       — 大小写不敏感子串（wholeWord=true 时加 \b 边界）
-func matchKey(text, key string, wholeWord bool) bool {
+func matchKey(text, key string, wholeWord bool, vars map[string]any) bool {
+	const varPrefix = "var:"
+	if strings.HasPrefix(key, varPrefix) {
+		expr := key[len(varPrefix):]
+		// var:key!=value
+		if idx := strings.Index(expr, "!="); idx > 0 {
+			varName, expected := expr[:idx], expr[idx+2:]
+			actual := fmt.Sprintf("%v", vars[varName])
+			return actual != expected
+		}
+		// var:key=value
+		if idx := strings.Index(expr, "="); idx > 0 {
+			varName, expected := expr[:idx], expr[idx+1:]
+			actual := fmt.Sprintf("%v", vars[varName])
+			return actual == expected
+		}
+		// var:key — 存在且非空
+		val, ok := vars[expr]
+		if !ok || val == nil {
+			return false
+		}
+		return fmt.Sprintf("%v", val) != ""
+	}
+
 	const regexPrefix = "regex:"
 	if strings.HasPrefix(key, regexPrefix) {
 		pattern := key[len(regexPrefix):]
