@@ -279,13 +279,16 @@ ST 格式（.jsonl）互转，供玩家备份存档或在 ST 和 WE 之间迁移
 | 多 Provider 原生适配 | 4-C | Phase 4 |
 | OpenAPI 文档（Swagger） | 4-D | Phase 4 |
 | 对话导入/导出（ST JSONL） | 4-E | Phase 4 |
+| Generation Coordination（并发写入保护） | 候选 4-F | Phase 4 候选 |
+| 世界书词条批量 PATCH/reorder | 候选 4-G | Phase 4 候选 |
 
 ### WE 明确不做（定位不同 / 成本收益不足）
 
 | TH / 其他引擎功能 | 不做原因 |
 |---------|---------|
 | **Character 版本管理（rollback）** | WE 用游戏包版本控制游戏内容，角色卡跟随游戏包迭代；不需要 session pin 到角色版本 |
-| **Background Job Runtime（DB 持久化 job 表）** | 当前 goroutine + in-memory lease 对 WE 场景够用；引入 DB job 表增加运维复杂度，收益不足 |
+| **Background Job Runtime（DB 持久化 job 表）** | 当前 goroutine + in-memory lease 对 WE 场景够用；引入 DB job 表增加运维复杂度，收益不足。TH 有完整的 RuntimeWorker + ChatTransferJob 框架，WE 不需要。 |
+| **Mutation Runtime / MutationBatch** | TH 的通用变更执行引擎和 async bridge 适合插件化 SaaS；WE 的简单直接写入足够，引入会增加不必要的间接层。 |
 | **llm_instance_config 独立表** | TH 为多账户 SaaS 场景设计；WE 的 LLMProfileBinding.Params 合并了两者，单租户场景无需拆分 |
 | **WebSocket Event Bus（50+ 事件）** | WE 的 SSE 已覆盖前端实时需求；Event Bus 适合插件/监控生态，WE 当前没有插件扩展需求 |
 | **Account User Binding 深度绑定** | WE 通过 `user_id` 字段简化处理，不需要 TH 的 account_user + session.user_snapshot 完整方案 |
@@ -293,6 +296,7 @@ ST 格式（.jsonl）互转，供玩家备份存档或在 ST 和 WE 之间迁移
 | **OpenAPI 中英文文档站（VitePress）** | 面向创作者的文档是 CW 的职责，WE 引擎只需要 Swagger UI 供开发联调 |
 | **真实 provider 最小回归 CI 脚本** | WE 用手动冒烟 + `.env` 覆盖；TH 的自动化回归脚本适合其 monorepo + CI 场景 |
 | **WebGal 式 KV + 状态机（确定性数值系统）** | WebGal 的 KV + 快照重算适合严格规则型跑团（COC/DND 战斗公式）；WE 面向开放叙事，数值精确性不是核心需求。精确数值计算的折中方案：用 Director 槽计算，Narrator 槽叙事渲染，两者分工。 |
+| **Floor Run State 精细状态机** | TH 记录生成管线每个阶段（input_recorded→prompt_assembled→…→transaction_committed），适合多副本调试和断点续传；WE 的 PromptSnapshot 已覆盖关键数据，当前场景不需要更细粒度。上 SaaS 前再评估。 |
 | **真正的实时多人联机（Room/分布式状态）** | 需要 WebSocket + 分布式锁 + conflict resolution，架构复杂度极高。WE 的四种轻量多人模式（旁观/轮流/异步论坛/观众投票）已能覆盖叙事游戏的多人需求，无需完整 MMO 基础设施。 |
 
 ---
@@ -313,13 +317,16 @@ ST 格式（.jsonl）互转，供玩家备份存档或在 ST 和 WE 之间迁移
 - **Memory Edge 关系图**（updates/contradicts/supports/resolves，✅ 3-A 完成）
 - **LLM 模型发现 + 连通性测试**（DiscoverModels / TestConnection，✅ 3-B 完成）
 - **Worldbook 互斥分组**（Group + GroupWeight + applyGroupCap，✅ 3-C 完成）
+- **Worldbook 变量门控**（`var:key=value` / `var:key!=value` / `var:key` 硬条件，✅ 3-D 完成）
 
 ### 待学习 / 待实现
-- **Worldbook 变量门控**：`var:key=value` 条件激活语法，引擎层强制阶段门控（3-D）
 - **Memory 分阶段标签**：`stage_tags` 过滤注入，多幕叙事 token 精确控制（3-E）
 - **边界归档**：`POST /sessions/:id/archive`，结局时固化关键记忆（3-F）
 - **Session branch_id**：TH M13 分支治理完整实现；WE Phase 3-G（改动较大，排后）
 - **AES-256-GCM 密钥加密**：TH M18 LLM Profile Vault；WE Phase 4-A
+- **Generation Coordination（并发生成协调）**：TH 有 `GenerationCoordinatorExecutionMode`（reject/queue）防止同一 session 并发生成冲突；WE 目前无此保护，高并发下可能出现数据竞争。候选 Phase 4。
+- **Floor Run State 精细状态机**：TH 有 `floor_run_state` 表记录生成管线各阶段状态（input_recorded→prompt_assembled→page_generating→transaction_committed），比 WE 的 PromptSnapshot 更细粒度；适合调试和断点续传。候选 Phase 5。
+- **世界书 / Preset 条目批量操作**：TH 有 `PATCH /worldbooks/:id/entries/batch/update|reorder`，WE 的 Preset Entry 有 reorder 但世界书缺批量 PATCH；低优先级。
 
 ---
 
