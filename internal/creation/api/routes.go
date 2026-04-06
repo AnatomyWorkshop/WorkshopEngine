@@ -14,6 +14,7 @@ import (
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
 	dbmodels "mvu-backend/internal/core/db"
+	"mvu-backend/internal/core/llm"
 	"mvu-backend/internal/creation/card"
 	"mvu-backend/internal/platform/auth"
 )
@@ -210,6 +211,24 @@ func RegisterCreationRoutes(rg *gin.RouterGroup, db *gorm.DB) {
 		c.JSON(http.StatusOK, gin.H{"code": 0, "data": gin.H{"slug": c.Param("slug"), "deleted": true}})
 	})
 
+	// PATCH /api/v2/create/cards/:slug — 更新角色卡字段
+	create.PATCH("/cards/:slug", func(c *gin.Context) {
+		var updates map[string]any
+		if err := c.ShouldBindJSON(&updates); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		delete(updates, "id")
+		delete(updates, "slug")
+		if err := db.Model(&dbmodels.CharacterCard{}).Where("slug = ?", c.Param("slug")).Updates(updates).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		var cc dbmodels.CharacterCard
+		db.Where("slug = ?", c.Param("slug")).First(&cc)
+		c.JSON(http.StatusOK, gin.H{"code": 0, "data": cc})
+	})
+
 	// ── LLM 配置接口（复刻 TH /llm-profiles）────────────────
 
 	registerLLMProfileRoutes(create, db)
@@ -217,6 +236,7 @@ func RegisterCreationRoutes(rg *gin.RouterGroup, db *gorm.DB) {
 	registerRegexProfileRoutes(create, db)
 	registerMaterialRoutes(create, db)
 	registerPresetToolRoutes(create, db)
+	registerImportExportRoutes(create, db)
 }
 
 // registerLLMProfileRoutes 注册 LLM 配置 CRUD 路由（/api/v2/create/llm-profiles/...）
@@ -335,6 +355,45 @@ func registerLLMProfileRoutes(rg *gin.RouterGroup, db *gorm.DB) {
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"code": 0, "data": gin.H{"id": c.Param("id"), "deleted": true}})
+	})
+
+	// POST /models/discover — 拉取指定 Provider 的可用模型列表
+	// Body: { "base_url": "...", "api_key": "..." }
+	lp.POST("/models/discover", func(c *gin.Context) {
+		var body struct {
+			BaseURL string `json:"base_url" binding:"required"`
+			APIKey  string `json:"api_key"  binding:"required"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		models, err := llm.DiscoverModels(c.Request.Context(), body.BaseURL, body.APIKey)
+		if err != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"code": 0, "data": models})
+	})
+
+	// POST /models/test — 向指定 Provider 发送探测消息，返回时延和响应片段
+	// Body: { "base_url": "...", "api_key": "...", "model": "..." }
+	lp.POST("/models/test", func(c *gin.Context) {
+		var body struct {
+			BaseURL string `json:"base_url" binding:"required"`
+			APIKey  string `json:"api_key"  binding:"required"`
+			Model   string `json:"model"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		result, err := llm.TestConnection(c.Request.Context(), body.BaseURL, body.APIKey, body.Model)
+		if err != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"code": 0, "data": result})
 	})
 
 	// POST /:id/activate — 绑定配置到指定作用域/插槽

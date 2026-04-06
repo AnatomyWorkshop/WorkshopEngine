@@ -150,11 +150,13 @@ func (e *GameEngine) PlayTurn(ctx context.Context, req TurnRequest) (*TurnRespon
 
 	// 解析模板 Config JSONB（memory_label / fallback_options / enabled_tools 等可选字段）
 	var tmplCfg struct {
-		MemoryLabel     string                  `json:"memory_label"`
-		FallbackOptions []string                `json:"fallback_options"`
-		EnabledTools    []string                `json:"enabled_tools"`
-		ScheduledTurns  []scheduled.TriggerRule `json:"scheduled_turns"`
-		DirectorPrompt  string                  `json:"director_prompt"` // 可选，Director 槽的分析指令
+		MemoryLabel       string                  `json:"memory_label"`
+		FallbackOptions   []string                `json:"fallback_options"`
+		EnabledTools      []string                `json:"enabled_tools"`
+		ScheduledTurns    []scheduled.TriggerRule `json:"scheduled_turns"`
+		DirectorPrompt    string                  `json:"director_prompt"`  // 可选，Director 槽的分析指令
+		VerifierPrompt    string                  `json:"verifier_prompt"`  // 可选，Verifier 槽校验指令（覆盖默认）
+		WorldbookGroupCap int                     `json:"worldbook_group_cap"` // 同组词条最多保留数（默认 1）
 	}
 	_ = json.Unmarshal(template.Config, &tmplCfg)
 
@@ -305,6 +307,7 @@ func (e *GameEngine) PlayTurn(ctx context.Context, req TurnRequest) (*TurnRespon
 			MemoryLabel:          tmplCfg.MemoryLabel,
 			FallbackOptions:      tmplCfg.FallbackOptions,
 			RegexRules:           regexRules,
+			WorldbookGroupCap:    tmplCfg.WorldbookGroupCap,
 		},
 		Variables:      sb.Flatten(),
 		RecentMessages: recentMsgs,
@@ -417,6 +420,10 @@ func (e *GameEngine) PlayTurn(ctx context.Context, req TurnRequest) (*TurnRespon
 		parsed.Options = tmplCfg.FallbackOptions
 	}
 
+	// ── 11b. Verifier 槽（可选，廉价模型一致性校验）──────────────
+	// 在 CommitTurn 前检查，失败不阻断——只影响 PromptSnapshot 中的标记。
+	verResult, _ := e.runVerifier(ctx, req.SessionID, sess.UserID, parsed.Narrative, tmplCfg.VerifierPrompt)
+
 	// ── 12. 更新 Page 沙箱变量 ────────────────────────────────
 	for k, v := range parsed.StatePatch {
 		sb.Set(k, v)
@@ -430,7 +437,7 @@ func (e *GameEngine) PlayTurn(ctx context.Context, req TurnRequest) (*TurnRespon
 	// ── 14. 同步递增楼层计数（ScheduledTurn 冷却检查依赖最新值）──────
 	count, _ := e.sessions.IncrFloorCount(req.SessionID)
 
-	// ── 15. 异步任务（不阻塞响应） ─────────────────────────────
+	// ── 15. 异步任务（记忆整合 + PromptSnapshot）─────────────────
 	go func() {
 		if parsed.Summary != "" {
 			_ = e.memStore.SaveFromParser(req.SessionID, parsed.Summary, 0)
@@ -438,6 +445,14 @@ func (e *GameEngine) PlayTurn(ctx context.Context, req TurnRequest) (*TurnRespon
 		if e.memoryTriggerRounds > 0 && count%e.memoryTriggerRounds == 0 {
 			e.triggerMemoryConsolidation(req.SessionID, history, count)
 		}
+		e.savePromptSnapshot(SnapshotInput{
+			SessionID:             req.SessionID,
+			FloorID:               floorID,
+			ActivatedWorldbookIDs: pipelineCtx.ActivatedWorldbookIDs,
+			FinalMessages:         finalMessages,
+			PipelineCtx:           pipelineCtx,
+			VerifyResult:          verResult,
+		})
 	}()
 
 	// ── 16. ScheduledTurn 触发检查（后置，基于本回合最终变量）────

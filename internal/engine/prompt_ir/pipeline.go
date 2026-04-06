@@ -25,6 +25,8 @@ type WorldbookEntry struct {
 	Position       string   `json:"position"`   // before_template | after_template | at_depth
 	WholeWord      bool     `json:"whole_word"`
 	Enabled        bool     `json:"enabled"`
+	Group          string   `json:"group"`        // 互斥分组名（空 = 不参与分组裁剪）
+	GroupWeight    float64  `json:"group_weight"` // 同组内优先级（降序，最高权重的词条被保留）
 }
 
 // RegexRule Prompt 后处理正则规则（来自 DB RegexRule，去掉 DB 字段）
@@ -50,6 +52,11 @@ type GameConfig struct {
 	// FallbackOptions parser fallback 时的默认选项（默认为空，由游戏模板配置）。
 	// 对应 GameTemplate.Config.fallback_options。
 	FallbackOptions []string
+
+	// WorldbookGroupCap 同组词条最多保留数量（默认 1）。
+	// 同组词条激活后按 GroupWeight 降序排列，超出 cap 的词条被丢弃，不参与注入。
+	// 对应 GameTemplate.Config.worldbook_group_cap。0 表示使用默认值 1。
+	WorldbookGroupCap int
 }
 
 // ContextData 是贯穿整个流水线的上下文载体。
@@ -60,6 +67,9 @@ type ContextData struct {
 	RecentMessages []Message             // 最近的 N 条历史记录 (用于世界书触发判断)
 	Blocks         []PromptBlock         // 输出的 IR 块
 	TokenBudget    int                   // Token 上限预留
+
+	// 流水线执行后填充，供调用方读取（不参与 Prompt 组装）
+	ActivatedWorldbookIDs []string // 本回合命中的世界书词条 ID 列表（用于 PromptSnapshot）
 }
 
 // Message 代表一条用于上下文匹配和最后生成的历史消息

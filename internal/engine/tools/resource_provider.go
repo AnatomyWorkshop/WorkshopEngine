@@ -1,7 +1,7 @@
 // Package tools — ResourceToolProvider
 //
-// 提供 12 个内置资源工具，让 LLM 在游戏回合中读写 WE 资源层（世界书、预设条目、
-// 游戏模板、会话状态、记忆）。游戏设计师在 GameTemplate.Config 的 enabled_tools
+// 提供 14 个内置资源工具，让 LLM 在游戏回合中读写 WE 资源层（世界书、预设条目、
+// 素材库、游戏模板、会话状态、记忆）。游戏设计师在 GameTemplate.Config 的 enabled_tools
 // 中写入 "resource:*" 即可一次性启用所有资源工具，无需写任何后端代码。
 //
 // 工具一览：
@@ -13,7 +13,9 @@
 //	worldbook_delete   — 软删除世界书条目（never_auto_replay）
 //	preset_list        — 列出游戏所有预设条目（safe）
 //	preset_get         — 按 identifier 获取预设条目（safe）
+//	preset_create      — 创建新预设条目（confirm_on_replay）
 //	preset_update      — 更新预设条目内容/启用状态（confirm_on_replay）
+//	material_create    — 向素材库添加内容（confirm_on_replay）
 //	template_info      — 获取当前游戏模板基本信息（safe）
 //	session_summary    — 获取会话状态（楼层数 + 记忆摘要）（safe）
 //	floor_history      — 获取最近 N 回合的对话内容（safe）
@@ -30,7 +32,7 @@ import (
 	"mvu-backend/internal/engine/memory"
 )
 
-// NewResourceToolProvider 返回资源工具列表（全部 12 个）。
+// NewResourceToolProvider 返回资源工具列表（全部 14 个）。
 // 调用方决定注册哪些：逐一 Register 或在 "resource:*" 开关下全部注册。
 func NewResourceToolProvider(db *gorm.DB, gameID, sessionID string, memStore *memory.Store) []Tool {
 	return []Tool{
@@ -41,7 +43,9 @@ func NewResourceToolProvider(db *gorm.DB, gameID, sessionID string, memStore *me
 		&worldbookDeleteTool{db: db, gameID: gameID},
 		&presetListTool{db: db, gameID: gameID},
 		&presetGetTool{db: db, gameID: gameID},
+		&presetCreateTool{db: db, gameID: gameID},
 		&presetUpdateTool{db: db, gameID: gameID},
+		&materialCreateTool{db: db, gameID: gameID},
 		&templateInfoTool{db: db, gameID: gameID},
 		&sessionSummaryTool{db: db, sessionID: sessionID},
 		&floorHistoryTool{db: db, sessionID: sessionID},
@@ -375,6 +379,68 @@ func (t *presetGetTool) Execute(_ context.Context, params json.RawMessage) (stri
 	return string(b), nil
 }
 
+// ── preset_create ─────────────────────────────────────────────────────────────
+
+type presetCreateTool struct {
+	db     *gorm.DB
+	gameID string
+}
+
+func (t *presetCreateTool) Name() string             { return "preset_create" }
+func (t *presetCreateTool) ReplaySafety() ReplaySafety { return ReplayConfirmOnReplay }
+func (t *presetCreateTool) Description() string {
+	return "创建一条新的预设条目（叙事规则/角色设定/格式要求等）"
+}
+func (t *presetCreateTool) Parameters() json.RawMessage {
+	return json.RawMessage(`{
+		"type": "object",
+		"properties": {
+			"identifier":      {"type": "string", "description": "唯一标识符（英文，如 main_persona）"},
+			"name":            {"type": "string", "description": "显示名称"},
+			"role":            {"type": "string", "description": "消息角色：system|user|assistant，默认 system"},
+			"content":         {"type": "string", "description": "条目内容（支持 {{宏}} 变量）"},
+			"injection_order": {"type": "integer", "description": "注入顺序（1-9 顶部，990-1009 角色人设槽），默认 1000"},
+			"is_system_prompt":{"type": "boolean", "description": "是否为主角色人设槽，默认 false"}
+		},
+		"required": ["identifier", "name", "content"]
+	}`)
+}
+func (t *presetCreateTool) Execute(_ context.Context, params json.RawMessage) (string, error) {
+	var p struct {
+		Identifier     string `json:"identifier"`
+		Name           string `json:"name"`
+		Role           string `json:"role"`
+		Content        string `json:"content"`
+		InjectionOrder *int   `json:"injection_order"`
+		IsSystemPrompt bool   `json:"is_system_prompt"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil {
+		return "", err
+	}
+	if p.Role == "" {
+		p.Role = "system"
+	}
+	injOrder := 1000
+	if p.InjectionOrder != nil {
+		injOrder = *p.InjectionOrder
+	}
+	entry := dbmodels.PresetEntry{
+		GameID:            t.gameID,
+		Identifier:        p.Identifier,
+		Name:              p.Name,
+		Role:              p.Role,
+		Content:           p.Content,
+		InjectionPosition: "system",
+		InjectionOrder:    injOrder,
+		Enabled:           true,
+		IsSystemPrompt:    p.IsSystemPrompt,
+	}
+	if err := t.db.Create(&entry).Error; err != nil {
+		return "", fmt.Errorf("preset_create: %w", err)
+	}
+	return fmt.Sprintf(`{"ok":true,"id":%q,"identifier":%q}`, entry.ID, entry.Identifier), nil
+}
+
 // ── preset_update ─────────────────────────────────────────────────────────────
 
 type presetUpdateTool struct {
@@ -423,6 +489,68 @@ func (t *presetUpdateTool) Execute(_ context.Context, params json.RawMessage) (s
 		return "", fmt.Errorf("preset_update: %w", err)
 	}
 	return `{"ok":true,"updated":true}`, nil
+}
+
+// ── material_create ───────────────────────────────────────────────────────────
+
+type materialCreateTool struct {
+	db     *gorm.DB
+	gameID string
+}
+
+func (t *materialCreateTool) Name() string             { return "material_create" }
+func (t *materialCreateTool) ReplaySafety() ReplaySafety { return ReplayConfirmOnReplay }
+func (t *materialCreateTool) Description() string {
+	return "向素材库添加一条内容（台词片段、氛围描写、场景文本等）"
+}
+func (t *materialCreateTool) Parameters() json.RawMessage {
+	return json.RawMessage(`{
+		"type": "object",
+		"properties": {
+			"content":      {"type": "string", "description": "素材正文"},
+			"type":         {"type": "string", "description": "素材类型（如 post/dialogue/description/event/atmosphere），默认 text"},
+			"mood":         {"type": "string", "description": "情绪标签（如 happy/sad/tense/neutral）"},
+			"style":        {"type": "string", "description": "风格标签（如 lyrical/aggressive/neutral）"},
+			"function_tag": {"type": "string", "description": "功能标签（如 atmosphere/plot_hook/dialogue/lore）"},
+			"tags":         {"type": "array", "items": {"type": "string"}, "description": "通用标签列表"}
+		},
+		"required": ["content"]
+	}`)
+}
+func (t *materialCreateTool) Execute(_ context.Context, params json.RawMessage) (string, error) {
+	var p struct {
+		Content     string   `json:"content"`
+		Type        string   `json:"type"`
+		Mood        string   `json:"mood"`
+		Style       string   `json:"style"`
+		FunctionTag string   `json:"function_tag"`
+		Tags        []string `json:"tags"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil {
+		return "", err
+	}
+	if p.Type == "" {
+		p.Type = "text"
+	}
+	tagsJSON, _ := json.Marshal(p.Tags)
+	if p.Tags == nil {
+		tagsJSON = []byte(`[]`)
+	}
+	m := dbmodels.Material{
+		GameID:      t.gameID,
+		Type:        p.Type,
+		Content:     p.Content,
+		Tags:        tagsJSON,
+		WorldTags:   []byte(`[]`),
+		Mood:        p.Mood,
+		Style:       p.Style,
+		FunctionTag: p.FunctionTag,
+		Enabled:     true,
+	}
+	if err := t.db.Create(&m).Error; err != nil {
+		return "", fmt.Errorf("material_create: %w", err)
+	}
+	return fmt.Sprintf(`{"ok":true,"id":%q}`, m.ID), nil
 }
 
 // ── template_info ─────────────────────────────────────────────────────────────

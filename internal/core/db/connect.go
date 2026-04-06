@@ -31,6 +31,7 @@ func migrate(db *gorm.DB) error {
 		&MessagePage{},
 		// 记忆系统
 		&Memory{},
+		&MemoryEdge{},
 		// 创作层
 		&CharacterCard{},
 		&GameTemplate{},
@@ -48,5 +49,7 @@ func migrate(db *gorm.DB) error {
 		&ToolExecutionRecord{},
 		// 用户自定义工具
 		&PresetTool{},
+		// Prompt 快照（Verifier 结果 + 命中词条）
+		&PromptSnapshot{},
 	)
 }

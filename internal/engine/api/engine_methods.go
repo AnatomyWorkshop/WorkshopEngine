@@ -121,11 +121,13 @@ func (e *GameEngine) StreamTurn(ctx context.Context, req TurnRequest) (<-chan st
 
 		// ── 3. 解析模板 Config（与 PlayTurn 对齐，含 ScheduledTurns）─
 		var tmplCfg struct {
-			MemoryLabel     string                  `json:"memory_label"`
-			FallbackOptions []string                `json:"fallback_options"`
-			EnabledTools    []string                `json:"enabled_tools"`
-			ScheduledTurns  []scheduled.TriggerRule `json:"scheduled_turns"`
-			DirectorPrompt  string                  `json:"director_prompt"`
+			MemoryLabel       string                  `json:"memory_label"`
+			FallbackOptions   []string                `json:"fallback_options"`
+			EnabledTools      []string                `json:"enabled_tools"`
+			ScheduledTurns    []scheduled.TriggerRule `json:"scheduled_turns"`
+			DirectorPrompt    string                  `json:"director_prompt"`
+			VerifierPrompt    string                  `json:"verifier_prompt"` // 可选，Verifier 槽校验指令
+			WorldbookGroupCap int                     `json:"worldbook_group_cap"`
 		}
 		_ = json.Unmarshal(template.Config, &tmplCfg)
 
@@ -188,6 +190,7 @@ func (e *GameEngine) StreamTurn(ctx context.Context, req TurnRequest) (<-chan st
 				Constant: entry.Constant, Priority: entry.Priority,
 				ScanDepth: entry.ScanDepth, Position: entry.Position,
 				WholeWord: entry.WholeWord, Enabled: entry.Enabled,
+				Group: entry.Group, GroupWeight: entry.GroupWeight,
 			})
 		}
 		var presetIR []prompt_ir.PresetEntry
@@ -227,6 +230,7 @@ func (e *GameEngine) StreamTurn(ctx context.Context, req TurnRequest) (<-chan st
 				MemoryLabel:          tmplCfg.MemoryLabel,
 				FallbackOptions:      tmplCfg.FallbackOptions,
 				RegexRules:           regexRules,
+				WorldbookGroupCap:    tmplCfg.WorldbookGroupCap,
 			},
 			Variables:      sb.Flatten(),
 			RecentMessages: recentMsgs,
@@ -388,6 +392,9 @@ func (e *GameEngine) StreamTurn(ctx context.Context, req TurnRequest) (<-chan st
 			parsed.Options = tmplCfg.FallbackOptions
 		}
 
+		// ── 11b. Verifier 槽（可选，廉价模型一致性校验）──────────────
+		verResult, _ := e.runVerifier(ctx, req.SessionID, sess.UserID, parsed.Narrative, tmplCfg.VerifierPrompt)
+
 		// ── 12. 更新变量沙箱 ──────────────────────────────────────
 		for k, v := range parsed.StatePatch {
 			sb.Set(k, v)
@@ -402,7 +409,7 @@ func (e *GameEngine) StreamTurn(ctx context.Context, req TurnRequest) (<-chan st
 		// ── 14. 同步递增楼层计数 ───────────────────────────────────
 		count, _ := e.sessions.IncrFloorCount(req.SessionID)
 
-		// ── 15. 异步任务（记忆整合）────────────────────────────────
+		// ── 15. 异步任务（记忆整合 + PromptSnapshot）────────────────
 		go func() {
 			if parsed.Summary != "" {
 				_ = e.memStore.SaveFromParser(req.SessionID, parsed.Summary, 0)
@@ -410,6 +417,14 @@ func (e *GameEngine) StreamTurn(ctx context.Context, req TurnRequest) (<-chan st
 			if e.memoryTriggerRounds > 0 && count%e.memoryTriggerRounds == 0 {
 				e.triggerMemoryConsolidation(req.SessionID, history, count)
 			}
+			e.savePromptSnapshot(SnapshotInput{
+				SessionID:             req.SessionID,
+				FloorID:               floorID,
+				ActivatedWorldbookIDs: pipelineCtx.ActivatedWorldbookIDs,
+				FinalMessages:         finalMessages,
+				PipelineCtx:           pipelineCtx,
+				VerifyResult:          verResult,
+			})
 		}()
 
 		// ── 16. ScheduledTurn 触发检查 ────────────────────────────
@@ -765,8 +780,9 @@ func (e *GameEngine) PromptPreview(ctx context.Context, sessionID, userInput str
 		Order("injection_order ASC").Find(&presetEntries)
 
 	var tmplCfg struct {
-		MemoryLabel     string   `json:"memory_label"`
-		FallbackOptions []string `json:"fallback_options"`
+		MemoryLabel       string   `json:"memory_label"`
+		FallbackOptions   []string `json:"fallback_options"`
+		WorldbookGroupCap int      `json:"worldbook_group_cap"`
 	}
 	_ = json.Unmarshal(tmpl.Config, &tmplCfg)
 
@@ -793,6 +809,7 @@ func (e *GameEngine) PromptPreview(ctx context.Context, sessionID, userInput str
 		wbIR = append(wbIR, prompt_ir.WorldbookEntry{
 			ID: entry.ID, Keys: keys, Content: entry.Content,
 			Constant: entry.Constant, Priority: entry.Priority, Enabled: entry.Enabled,
+			Group: entry.Group, GroupWeight: entry.GroupWeight,
 		})
 	}
 	var presetIR []prompt_ir.PresetEntry
@@ -814,6 +831,7 @@ func (e *GameEngine) PromptPreview(ctx context.Context, sessionID, userInput str
 			MemorySummary:        sess.MemorySummary,
 			MemoryLabel:          tmplCfg.MemoryLabel,
 			FallbackOptions:      tmplCfg.FallbackOptions,
+			WorldbookGroupCap:    tmplCfg.WorldbookGroupCap,
 		},
 		Variables:      sb.Flatten(),
 		RecentMessages: recentMsgs,

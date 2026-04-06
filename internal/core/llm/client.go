@@ -355,6 +355,81 @@ func buildBody(opts Options, messages []Message) map[string]any {
 	return m
 }
 
+// ── 模型发现 + 连通性测试 ─────────────────────────────────────
+
+// ModelInfo 单个可用模型的基本信息
+type ModelInfo struct {
+	ID    string `json:"id"`
+	Label string `json:"label"` // 友好名称，当前与 ID 相同（API 不返回 display_name）
+}
+
+// DiscoverModels 调用 OpenAI /models 接口，返回该 Provider 的模型列表。
+// 直接使用传入的 baseURL + apiKey，不依赖已有 Client 实例。
+func DiscoverModels(ctx context.Context, baseURL, apiKey string) ([]ModelInfo, error) {
+	baseURL = strings.TrimRight(baseURL, "/")
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/models", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+
+	hc := &http.Client{Timeout: 15 * time.Second}
+	resp, err := hc.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("http: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		b, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("api error %d: %s", resp.StatusCode, string(b))
+	}
+
+	var payload struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return nil, fmt.Errorf("decode: %w", err)
+	}
+
+	models := make([]ModelInfo, 0, len(payload.Data))
+	for _, m := range payload.Data {
+		models = append(models, ModelInfo{ID: m.ID, Label: m.ID})
+	}
+	return models, nil
+}
+
+// TestResult 连通性测试结果
+type TestResult struct {
+	LatencyMs    int64  `json:"latency_ms"`
+	ResponseText string `json:"response_text"`
+}
+
+// TestConnection 向指定 Provider 发送一条单字探测消息，返回时延和响应片段。
+// model 为空时使用 "gpt-3.5-turbo"（大多数 OpenAI-compat Provider 都支持）作为探测 model。
+func TestConnection(ctx context.Context, baseURL, apiKey, model string) (*TestResult, error) {
+	if model == "" {
+		model = "gpt-3.5-turbo"
+	}
+	c := NewClient(baseURL, apiKey, model, 30, 0)
+
+	start := time.Now()
+	resp, err := c.Chat(ctx, []Message{{Role: "user", Content: "Hi"}}, Options{MaxTokens: 16})
+	latency := time.Since(start).Milliseconds()
+	if err != nil {
+		return nil, err
+	}
+
+	text := resp.Content
+	if len([]rune(text)) > 100 {
+		runes := []rune(text)
+		text = string(runes[:100]) + "…"
+	}
+	return &TestResult{LatencyMs: latency, ResponseText: text}, nil
+}
+
 // ── 错误类型 ─────────────────────────────────────────────
 
 type retryableError struct{ msg string }

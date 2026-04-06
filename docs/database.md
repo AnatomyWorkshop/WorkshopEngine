@@ -135,7 +135,7 @@
 | `updated_at` | `timestamptz` | | 更新时间 |
 
 枚举约束：
-- `type`: `visual_novel | narrative | simulator`
+- `type`: `text`（纯文字）、`light`（轻前端）、`rich`（重前端），允许创作者自由描述，样本积累后逐步统一
 - `status`: `draft | published`
 
 索引：

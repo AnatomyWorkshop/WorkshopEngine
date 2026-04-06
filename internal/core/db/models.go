@@ -70,15 +70,46 @@ const (
 
 // Memory 一条记忆条目
 type Memory struct {
-	ID         string         `gorm:"primaryKey;type:uuid;default:gen_random_uuid()" json:"id"`
-	SessionID  string         `gorm:"not null;index"                                json:"session_id"`
-	Content    string         `gorm:"type:text;not null"                            json:"content"`
-	Type       MemoryType     `gorm:"not null;default:'summary'"                    json:"type"`
-	Importance float64        `gorm:"default:1.0"                                   json:"importance"` // 衰减排序权重
-	SourceFloor int           `json:"source_floor"` // 来自第几楼层（可溯源）
-	Deprecated bool           `gorm:"default:false"                                 json:"deprecated"` // 过时标记
-	CreatedAt  time.Time      `json:"created_at"`
-	UpdatedAt  time.Time      `json:"updated_at"`
+	ID          string     `gorm:"primaryKey;type:uuid;default:gen_random_uuid()" json:"id"`
+	SessionID   string     `gorm:"not null;index"                                json:"session_id"`
+	FactKey     string     `gorm:"index;default:''"                              json:"fact_key"`    // 结构化事实的稳定键（type=fact 时有效，空=自由文本摘要）
+	Content     string     `gorm:"type:text;not null"                            json:"content"`
+	Type        MemoryType `gorm:"not null;default:'summary'"                    json:"type"`
+	Importance  float64    `gorm:"default:1.0"                                   json:"importance"`  // 衰减排序权重
+	SourceFloor int        `json:"source_floor"`                                                  // 来自第几楼层（可溯源）
+	Deprecated  bool       `gorm:"default:false"                                 json:"deprecated"` // 过时标记
+	CreatedAt   time.Time  `json:"created_at"`
+	UpdatedAt   time.Time  `json:"updated_at"`
+}
+
+// MemoryRelation 记忆边的关系类型
+type MemoryRelation string
+
+const (
+	// MemoryRelationUpdates 新事实更新/取代旧事实（fact_key 冲突时写入）
+	MemoryRelationUpdates MemoryRelation = "updates"
+	// MemoryRelationContradicts 两条事实相互矛盾（由 Memory Lint 或 LLM 标记）
+	MemoryRelationContradicts MemoryRelation = "contradicts"
+	// MemoryRelationSupports 一条事实支持/强化另一条事实
+	MemoryRelationSupports MemoryRelation = "supports"
+	// MemoryRelationResolves 摘要或事实解决了一个悬念（open_loop）
+	MemoryRelationResolves MemoryRelation = "resolves"
+)
+
+// MemoryEdge 记忆条目之间的有向关系边
+//
+// 设计说明：
+//   - 不参与 Prompt 注入，仅用于溯源、审计和 Memory Lint
+//   - from_id → to_id 表示"from 对 to 施加 relation"（如 新事实 updates 旧事实）
+//   - CASCADE 删除：memory 条目被物理删除时关联 edge 自动清除
+//   - 对应 TH memory_edge 表，简化为 WE 所需的 4 种 relation（去掉 TH 双层压缩专用的 derived_from / compacts）
+type MemoryEdge struct {
+	ID        string         `gorm:"primaryKey;type:uuid;default:gen_random_uuid()" json:"id"`
+	SessionID string         `gorm:"not null;index"                                json:"session_id"`
+	FromID    string         `gorm:"not null;index"                                json:"from_id"` // 施加关系的一方
+	ToID      string         `gorm:"not null;index"                                json:"to_id"`   // 被施加关系的一方
+	Relation  MemoryRelation `gorm:"not null"                                      json:"relation"`
+	CreatedAt time.Time      `json:"created_at"`
 }
 
 // ──────────────────────────────────────────────────────
@@ -105,7 +136,7 @@ type GameTemplate struct {
 	ID                   string         `gorm:"primaryKey;type:uuid;default:gen_random_uuid()" json:"id"`
 	Slug                 string         `gorm:"uniqueIndex;not null"                          json:"slug"`
 	Title                string         `gorm:"not null"                                      json:"title"`
-	Type                 string         `gorm:"not null;default:'visual_novel'"               json:"type"` // visual_novel | narrative | simulator
+	Type                 string         `gorm:"not null;default:'text'"                       json:"type"` // text（纯文字）| light（轻前端）| rich（重前端）| 创作者自由描述
 	Description          string         `json:"description"`
 	SystemPromptTemplate string         `gorm:"type:text"                                     json:"system_prompt_template"` // 支持 {{宏}} 变量展开
 	Config               datatypes.JSON `gorm:"type:jsonb;default:'{}'"                       json:"config"`                // 初始变量、资产配置等
@@ -124,12 +155,14 @@ type WorldbookEntry struct {
 	SecondaryKeys  datatypes.JSON `gorm:"type:jsonb;default:'[]'"                       json:"secondary_keys"`  // []string 次级关键词
 	SecondaryLogic string         `gorm:"default:'and_any'"                             json:"secondary_logic"` // and_any | and_all | not_any | not_all
 	Content        string         `gorm:"type:text;not null"                            json:"content"`
-	Constant       bool           `gorm:"default:false"                                 json:"constant"`    // 无条件常驻
-	Priority       int            `gorm:"default:0"                                     json:"priority"`    // 优先级偏移
-	ScanDepth      int            `gorm:"default:0"                                     json:"scan_depth"`  // 扫描最近 N 条消息（0 = 全部）
-	Position       string         `gorm:"default:'before_template'"                     json:"position"`    // before_template | after_template | at_depth
-	WholeWord      bool           `gorm:"default:false"                                 json:"whole_word"`  // 全词匹配
+	Constant       bool           `gorm:"default:false"                                 json:"constant"`      // 无条件常驻
+	Priority       int            `gorm:"default:0"                                     json:"priority"`      // 优先级偏移
+	ScanDepth      int            `gorm:"default:0"                                     json:"scan_depth"`    // 扫描最近 N 条消息（0 = 全部）
+	Position       string         `gorm:"default:'before_template'"                     json:"position"`      // before_template | after_template | at_depth
+	WholeWord      bool           `gorm:"default:false"                                 json:"whole_word"`    // 全词匹配
 	Enabled        bool           `gorm:"default:true"                                  json:"enabled"`
+	Group          string         `gorm:"default:''"                                    json:"group"`         // 互斥分组名（空 = 不参与分组裁剪）
+	GroupWeight    float64        `gorm:"default:0"                                     json:"group_weight"`  // 同组内优先级（降序，最高权重的词条被保留）
 	Comment        string         `json:"comment"`
 	CreatedAt      time.Time      `json:"created_at"`
 }
@@ -267,6 +300,30 @@ type PresetTool struct {
 	Enabled     bool           `gorm:"default:true"                                    json:"enabled"`
 	CreatedAt   time.Time      `json:"created_at"`
 	UpdatedAt   time.Time      `json:"updated_at"`
+}
+
+// PromptSnapshot 记录某个 committed floor 实际生成时使用的 Prompt 资源版本和诊断信息。
+//
+// 复刻 TH 的 prompt_snapshot 表：
+//   - 每个已提交楼层都有一条快照，冻结本次生成的 preset/worldbook/regex 状态
+//   - ActivatedWorldbookIDs：本回合触发的世界书词条 ID 列表（JSON 数组）
+//   - PresetHits：生效的 Preset Entry 数量
+//   - EstTokens：粗估 Prompt Token 总数（BPE 兼容的启发式估算）
+//   - VerifyPassed：Verifier 槽校验结果（null=未配置 verifier，true/false=校验通过/拒绝）
+//   - VerifyNote：Verifier 给出的简短说明（通过时为空）
+//
+// 对应 GET /sessions/:id/floors/:fid/snapshot。
+type PromptSnapshot struct {
+	ID                    string         `gorm:"primaryKey;type:uuid;default:gen_random_uuid()" json:"id"`
+	SessionID             string         `gorm:"not null;index"                                 json:"session_id"`
+	FloorID               string         `gorm:"not null;uniqueIndex"                           json:"floor_id"` // 1 floor : 1 snapshot
+	ActivatedWorldbookIDs datatypes.JSON `gorm:"type:jsonb;default:'[]'"                        json:"activated_worldbook_ids"` // []string
+	PresetHits            int            `json:"preset_hits"`      // 生效的 PresetEntry 数量
+	WorldbookHits         int            `json:"worldbook_hits"`   // 命中的世界书词条数量
+	EstTokens             int            `json:"est_tokens"`       // 粗估 token 总数
+	VerifyPassed          *bool          `json:"verify_passed"`    // null=未运行，true=通过，false=拒绝
+	VerifyNote            string         `json:"verify_note"`      // Verifier 说明（通过时空串）
+	CreatedAt             time.Time      `json:"created_at"`
 }
 
 // Material 素材库条目（游戏级内容池）。

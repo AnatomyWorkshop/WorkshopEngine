@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"regexp"
+	"sort"
 	"strings"
 
 	"mvu-backend/internal/engine/prompt_ir"
@@ -97,7 +98,12 @@ func (n *WorldbookNode) Process(ctx *prompt_ir.ContextData) error {
 		}
 	}
 
-	// ── 组装 PromptBlocks ─────────────────────────────────────
+	// ── 分组裁剪（互斥分组）─────────────────────────────────────
+	// 同组词条（Group != ""）按 GroupWeight 降序排列，超出 cap 的词条丢弃。
+	// cap 由 GameConfig.WorldbookGroupCap 配置（默认 1，即每组只保留权重最高的词条）。
+	activated = applyGroupCap(activated, ctx.Config.WorldbookGroupCap)
+
+	// ── 组装 PromptBlocks + 记录命中 ID ───────────────────────
 	for _, entry := range activated {
 		content := n.resolveMacros(entry.Content, ctx.Variables)
 		priority := positionToPriority(entry.Position, entry.Priority)
@@ -108,6 +114,10 @@ func (n *WorldbookNode) Process(ctx *prompt_ir.ContextData) error {
 			Content:  content,
 			Priority: priority,
 		})
+		// 暴露命中词条 ID，供 PromptSnapshot 持久化使用
+		if entry.ID != "" {
+			ctx.ActivatedWorldbookIDs = append(ctx.ActivatedWorldbookIDs, entry.ID)
+		}
 	}
 
 	return nil
@@ -227,4 +237,37 @@ func (n *WorldbookNode) resolveMacros(text string, vars map[string]any) string {
 		}
 	}
 	return res
+}
+
+// applyGroupCap 对同组词条做互斥裁剪：
+// 每个非空 Group 内，按 GroupWeight 降序排列，只保留前 cap 条。
+// cap <= 0 时视为 1（默认每组最多保留一条）。
+// Group 为空的词条不受影响，全部保留。
+func applyGroupCap(entries []prompt_ir.WorldbookEntry, cap int) []prompt_ir.WorldbookEntry {
+	if cap <= 0 {
+		cap = 1
+	}
+
+	// 按组收集
+	groups := map[string][]prompt_ir.WorldbookEntry{}
+	var ungrouped []prompt_ir.WorldbookEntry
+	for _, e := range entries {
+		if e.Group == "" {
+			ungrouped = append(ungrouped, e)
+		} else {
+			groups[e.Group] = append(groups[e.Group], e)
+		}
+	}
+
+	result := ungrouped
+	for _, group := range groups {
+		sort.Slice(group, func(i, j int) bool {
+			return group[i].GroupWeight > group[j].GroupWeight
+		})
+		if len(group) > cap {
+			group = group[:cap]
+		}
+		result = append(result, group...)
+	}
+	return result
 }

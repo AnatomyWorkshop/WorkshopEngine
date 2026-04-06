@@ -27,11 +27,7 @@ type StoreConfig struct {
 	// MaxCandidates 注入前从 DB 取的最大候选条数。默认 50。
 	MaxCandidates int
 
-	// ConsolidationInstruction 发送给 LLM 的摘要整合指令头（纯文本）。
-	// 留空则使用内置默认值。支持 {existing_memory} 和 {dialogue} 占位符。
-	ConsolidationInstruction string
-
-	// FactPrefix 整合结果中事实条目的行前缀（不含空格）。默认 "事实："。
+	// FactPrefix 旧格式回退解析中事实条目的行前缀（不含空格）。默认 "事实："。
 	// ParseConsolidationResult 同时兼容 ASCII 冒号变体（"事实:"）。
 	FactPrefix string
 }
@@ -79,7 +75,7 @@ func (s *Store) SaveFromParser(sessionID, summary string, sourceFloor int) error
 	return s.db.Create(&mem).Error
 }
 
-// SaveFact 写入一条明确事实记忆（如：玩家拿了钥匙）
+// SaveFact 写入一条明确事实记忆（如：玩家拿了钥匙），不带 fact_key（自由文本）
 func (s *Store) SaveFact(sessionID, content string, importance float64) error {
 	mem := dbmodels.Memory{
 		SessionID:  sessionID,
@@ -88,6 +84,67 @@ func (s *Store) SaveFact(sessionID, content string, importance float64) error {
 		Importance: importance,
 	}
 	return s.db.Create(&mem).Error
+}
+
+// UpsertFact 按 factKey 更新或新建一条结构化事实。
+//
+// 行为：
+//   - 若该 session + factKey 已有未废弃记录：将旧行 deprecated=true，再新建一行。
+//     返回 (newID, oldID, nil)，调用方可据此写入 "updates" 关系边。
+//   - 若无已有记录：直接新建一行。
+//     返回 (newID, "", nil)。
+//
+// 与旧版的差异：旧版做 in-place UPDATE（同一行 ID），新版先废弃旧行再新建，
+// 保留历史行供 edge 溯源和 Lint 审计。
+func (s *Store) UpsertFact(sessionID, factKey, content string, importance float64, sourceFloor int) (newID, oldID string, err error) {
+	var existing dbmodels.Memory
+	findErr := s.db.Where("session_id = ? AND fact_key = ? AND deprecated = false", sessionID, factKey).
+		First(&existing).Error
+	if findErr == nil {
+		// 旧行存在 → 废弃旧行
+		oldID = existing.ID
+		if err = s.db.Model(&existing).Update("deprecated", true).Error; err != nil {
+			return "", "", err
+		}
+	}
+	// 新建行
+	newMem := &dbmodels.Memory{
+		SessionID:   sessionID,
+		FactKey:     factKey,
+		Content:     content,
+		Type:        dbmodels.MemoryFact,
+		Importance:  importance,
+		SourceFloor: sourceFloor,
+	}
+	if err = s.db.Create(newMem).Error; err != nil {
+		return "", "", err
+	}
+	return newMem.ID, oldID, nil
+}
+
+// DeprecateFactsByKey 按 factKey 列表批量废弃事实，返回被废弃的记录 ID 列表（供写入 edge 用）。
+func (s *Store) DeprecateFactsByKey(sessionID string, keys []string) ([]dbmodels.Memory, error) {
+	if len(keys) == 0 {
+		return nil, nil
+	}
+	var mems []dbmodels.Memory
+	if err := s.db.Where("session_id = ? AND fact_key IN ? AND deprecated = false", sessionID, keys).
+		Find(&mems).Error; err != nil {
+		return nil, err
+	}
+	if len(mems) == 0 {
+		return nil, nil
+	}
+	ids := make([]string, len(mems))
+	for i, m := range mems {
+		ids[i] = m.ID
+	}
+	if err := s.db.Model(&dbmodels.Memory{}).
+		Where("id IN ?", ids).
+		Update("deprecated", true).Error; err != nil {
+		return nil, err
+	}
+	return mems, nil
 }
 
 // GetForInjection 按重要度衰减排序，在 Token 预算内取最相关的记忆拼成注入文本
@@ -128,12 +185,12 @@ func (s *Store) GetForInjection(sessionID string, tokenBudget int) (string, erro
 	usedTokens := 0
 	var parts []string
 	for _, sm := range scored {
-		content := sm.mem.Content
-		est := tokenizer.Estimate(content)
+		line := formatMemoryLine(sm.mem)
+		est := tokenizer.Estimate(line)
 		if usedTokens+est > tokenBudget {
 			break
 		}
-		parts = append(parts, content)
+		parts = append(parts, line)
 		usedTokens += est + 1 // +1 for separator token
 	}
 
@@ -141,6 +198,15 @@ func (s *Store) GetForInjection(sessionID string, tokenBudget int) (string, erro
 		return "", nil
 	}
 	return strings.Join(parts, "\n"), nil
+}
+
+// formatMemoryLine 将记忆条目格式化为注入文本的一行。
+// type=fact 且 fact_key 非空时加 [key] 前缀，方便 Narrator LLM 与后续整合时的 key 对应。
+func formatMemoryLine(m dbmodels.Memory) string {
+	if m.Type == dbmodels.MemoryFact && m.FactKey != "" {
+		return fmt.Sprintf("[%s] %s", m.FactKey, m.Content)
+	}
+	return m.Content
 }
 
 // DeprecateFacts 标记过时的记忆（由 Worker 定期调用）
@@ -156,15 +222,30 @@ type ConsolidationInput struct {
 	RecentFloor int // 从第几楼层开始整合
 }
 
-// defaultConsolidationInstruction 内置整合指令（可通过 StoreConfig.ConsolidationInstruction 覆盖）。
-const defaultConsolidationInstruction = "以下是一段游戏剧情对话，请提取关键事实和剧情摘要，用简洁的语言列出（每条不超过50字）："
+// consolidationJSONInstruction 结构化整合指令（JSON 输出模式，优先使用）。
+const consolidationJSONInstruction = `你是游戏记忆整合助手。根据下方的【已有事实】和【近期对话】，输出一个 JSON 对象，格式严格如下：
+
+{
+  "turn_summary": "一句话整体叙事摘要（不超过60字）",
+  "facts_add":    [{"key": "唯一键（英文蛇形命名，如 player_affinity）", "content": "事实描述"}],
+  "facts_update": [{"key": "已有事实的 key", "content": "更新后的描述"}],
+  "facts_deprecate": ["需要废弃的事实 key1", "key2"]
+}
+
+规则：
+- key 必须是英文蛇形命名（a-z 和下划线），全局唯一，不能与已有 key 重复（除非是 facts_update）
+- 已有事实如果仍然准确，不需要出现在任何数组中
+- 仅输出 JSON，不要有任何前缀或解释文字`
 
 // BuildConsolidationPrompt 构建摘要整合用的 Prompt（供 Worker 调用廉价模型生成新摘要）
 // 复刻 TH Memory Worker 的核心逻辑
 func (s *Store) BuildConsolidationPrompt(sessionID string, recentDialogue []map[string]string) (string, error) {
-	// 读取已有摘要
-	existing, err := s.GetForInjection(sessionID, 800)
-	if err != nil {
+	// 读取已有未废弃的事实（含 key）
+	var existingFacts []dbmodels.Memory
+	if err := s.db.Where("session_id = ? AND deprecated = false AND type = ?",
+		sessionID, dbmodels.MemoryFact).
+		Order("importance DESC, created_at DESC").
+		Limit(30).Find(&existingFacts).Error; err != nil {
 		return "", err
 	}
 
@@ -178,23 +259,111 @@ func (s *Store) BuildConsolidationPrompt(sessionID string, recentDialogue []map[
 	}
 	dialogue := strings.Join(dialogueParts, "\n")
 
-	instruction := s.cfg.ConsolidationInstruction
-	if instruction == "" {
-		instruction = defaultConsolidationInstruction
+	// 使用结构化 JSON 指令
+	prompt := consolidationJSONInstruction + "\n\n"
+
+	if len(existingFacts) > 0 {
+		prompt += "【已有事实】\n"
+		for _, f := range existingFacts {
+			if f.FactKey != "" {
+				prompt += fmt.Sprintf("- [%s] %s\n", f.FactKey, f.Content)
+			} else {
+				prompt += fmt.Sprintf("- %s\n", f.Content)
+			}
+		}
+		prompt += "\n"
 	}
 
-	prompt := instruction + "\n\n"
-	if existing != "" {
-		prompt += "【已有记忆背景】\n" + existing + "\n\n"
-	}
-	prompt += "【近期对话】\n" + dialogue + "\n\n"
-	prompt += "输出格式：\n<Summary>一句话整体摘要</Summary>\n每条关键事实单独一行，以「事实：」开头。"
+	prompt += "【近期对话】\n" + dialogue
 
 	return prompt, nil
 }
 
-// ParseConsolidationResult 解析摘要整合结果并写入库
+// consolidationJSON 是 LLM 结构化整合输出的反序列化目标。
+type consolidationJSON struct {
+	TurnSummary    string        `json:"turn_summary"`
+	FactsAdd       []factEntry   `json:"facts_add"`
+	FactsUpdate    []factEntry   `json:"facts_update"`
+	FactsDeprecate []string      `json:"facts_deprecate"`
+}
+
+type factEntry struct {
+	Key     string `json:"key"`
+	Content string `json:"content"`
+}
+
+// ParseConsolidationResult 解析整合结果并写入库。
+//
+// 优先解析结构化 JSON（三路操作：add / update / deprecate）；
+// 若 JSON 解析失败，回退到旧格式（<Summary> + 事实：前缀行）保证向后兼容。
 func (s *Store) ParseConsolidationResult(sessionID string, result string, sourceFloor int) error {
+	// ── 尝试 JSON 解析 ──────────────────────────────────────────────
+	// 找第一个 '{' 和最后一个 '}'，提取 JSON 子串（LLM 可能在前后加说明文字）
+	start := strings.Index(result, "{")
+	end := strings.LastIndex(result, "}")
+	if start >= 0 && end > start {
+		var out consolidationJSON
+		if err := json.Unmarshal([]byte(result[start:end+1]), &out); err == nil {
+			return s.applyStructuredResult(sessionID, sourceFloor, out)
+		}
+	}
+
+	// ── 回退：旧格式解析 ─────────────────────────────────────────────
+	return s.parseLegacyResult(sessionID, result, sourceFloor)
+}
+
+// applyStructuredResult 把结构化 JSON 三路操作写入库，并写入关系边。
+func (s *Store) applyStructuredResult(sessionID string, sourceFloor int, out consolidationJSON) error {
+	var errs []string
+
+	// 1. 废弃（LLM 明确指定废弃的 key）— 不写 edge，纯标记
+	if _, err := s.DeprecateFactsByKey(sessionID, out.FactsDeprecate); err != nil {
+		errs = append(errs, "deprecate: "+err.Error())
+	}
+
+	// 2. 新增（全新 key，无旧行可引用，不写 edge）
+	for _, f := range out.FactsAdd {
+		if f.Key == "" || f.Content == "" {
+			continue
+		}
+		if _, _, err := s.UpsertFact(sessionID, f.Key, f.Content, 0.9, sourceFloor); err != nil {
+			errs = append(errs, "add "+f.Key+": "+err.Error())
+		}
+	}
+
+	// 3. 更新（更新已有 key）— 写入 "updates" 关系边
+	for _, f := range out.FactsUpdate {
+		if f.Key == "" || f.Content == "" {
+			continue
+		}
+		newID, oldID, err := s.UpsertFact(sessionID, f.Key, f.Content, 0.9, sourceFloor)
+		if err != nil {
+			errs = append(errs, "update "+f.Key+": "+err.Error())
+			continue
+		}
+		// 有旧行被废弃时写入 updates 边（新行 → 旧行）
+		if oldID != "" {
+			if _, edgeErr := s.SaveEdge(sessionID, newID, oldID, dbmodels.MemoryRelationUpdates); edgeErr != nil {
+				errs = append(errs, "edge updates "+f.Key+": "+edgeErr.Error())
+			}
+		}
+	}
+
+	// 4. 本轮摘要
+	if out.TurnSummary != "" {
+		if err := s.SaveFromParser(sessionID, out.TurnSummary, sourceFloor); err != nil {
+			errs = append(errs, "summary: "+err.Error())
+		}
+	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("consolidation partial errors: %s", strings.Join(errs, "; "))
+	}
+	return nil
+}
+
+// parseLegacyResult 旧格式回退解析（<Summary> + 事实：行前缀）。
+func (s *Store) parseLegacyResult(sessionID, result string, sourceFloor int) error {
 	// 提取 <Summary> 标签
 	var summary string
 	if idx := strings.Index(result, "<Summary>"); idx >= 0 {
@@ -369,4 +538,75 @@ func (s *Store) PurgeDeprecatedMemoriesGlobal(olderThanDays int) (int64, error) 
 	result := s.db.Where("deprecated = true AND updated_at < ?", cutoff).
 		Delete(&dbmodels.Memory{})
 	return result.RowsAffected, result.Error
+}
+
+// ── Memory Edge（记忆关系图）──────────────────────────────────────────────────
+//
+// edge 仅用于溯源、审计和未来的 Memory Lint，不参与 Prompt 注入。
+// 对应 TH memory_edge 表，WE 简化为 4 种 relation（去掉 TH 双层压缩专用的 derived_from / compacts）。
+
+// SaveEdge 写入一条记忆关系边。
+// from_id → to_id 表示"from 对 to 施加 relation"（如 新事实 updates 旧事实）。
+func (s *Store) SaveEdge(sessionID, fromID, toID string, relation dbmodels.MemoryRelation) (*dbmodels.MemoryEdge, error) {
+	edge := &dbmodels.MemoryEdge{
+		SessionID: sessionID,
+		FromID:    fromID,
+		ToID:      toID,
+		Relation:  relation,
+	}
+	if err := s.db.Create(edge).Error; err != nil {
+		return nil, err
+	}
+	return edge, nil
+}
+
+// ListEdges 列出一条记忆条目的所有关联边（双向：from 或 to 匹配均返回）。
+// 对应 TH findEdges(itemId)。
+func (s *Store) ListEdges(sessionID, memoryID string) ([]dbmodels.MemoryEdge, error) {
+	var edges []dbmodels.MemoryEdge
+	err := s.db.Where(
+		"session_id = ? AND (from_id = ? OR to_id = ?)",
+		sessionID, memoryID, memoryID,
+	).Order("created_at DESC").Find(&edges).Error
+	return edges, err
+}
+
+// ListEdgesBySession 列出一个会话的所有边（供 API 分页查询用）。
+func (s *Store) ListEdgesBySession(sessionID string, relation dbmodels.MemoryRelation, limit, offset int) ([]dbmodels.MemoryEdge, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	q := s.db.Where("session_id = ?", sessionID)
+	if relation != "" {
+		q = q.Where("relation = ?", relation)
+	}
+	var edges []dbmodels.MemoryEdge
+	err := q.Order("created_at DESC").Limit(limit).Offset(offset).Find(&edges).Error
+	return edges, err
+}
+
+// DeleteEdge 物理删除一条边（管理员 / 调试用）。
+func (s *Store) DeleteEdge(sessionID, edgeID string) error {
+	result := s.db.Where("id = ? AND session_id = ?", edgeID, sessionID).Delete(&dbmodels.MemoryEdge{})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return fmt.Errorf("edge not found: %s", edgeID)
+	}
+	return nil
+}
+
+// UpdateEdgeRelation 修改一条边的 relation 类型（调试用，relation 标错时无需删除重建）。
+func (s *Store) UpdateEdgeRelation(sessionID, edgeID string, relation dbmodels.MemoryRelation) (*dbmodels.MemoryEdge, error) {
+	if err := s.db.Model(&dbmodels.MemoryEdge{}).
+		Where("id = ? AND session_id = ?", edgeID, sessionID).
+		Update("relation", relation).Error; err != nil {
+		return nil, err
+	}
+	var edge dbmodels.MemoryEdge
+	if err := s.db.First(&edge, "id = ? AND session_id = ?", edgeID, sessionID).Error; err != nil {
+		return nil, fmt.Errorf("edge not found: %s", edgeID)
+	}
+	return &edge, nil
 }

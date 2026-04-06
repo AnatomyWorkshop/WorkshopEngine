@@ -14,6 +14,15 @@ import (
 func RegisterGameRoutes(rg *gin.RouterGroup, engine *GameEngine) {
 	play := rg.Group("/play")
 
+	// GET /play/games — 获取已发布游戏列表（公开字段）
+	play.GET("/games", func(c *gin.Context) {
+		var games []dbmodels.GameTemplate
+		engine.db.Select("id, slug, title, type, description, cover_url, author_id, created_at").
+			Where("status = 'published'").
+			Order("created_at DESC").Find(&games)
+		c.JSON(http.StatusOK, gin.H{"code": 0, "data": games})
+	})
+
 	play.POST("/sessions", func(c *gin.Context) {
 		var req struct {
 			GameID string `json:"game_id" binding:"required"`
@@ -294,6 +303,16 @@ func RegisterGameRoutes(rg *gin.RouterGroup, engine *GameEngine) {
 		c.JSON(http.StatusOK, gin.H{"code": 0, "data": preview})
 	})
 
+	// GET /sessions/:id/floors/:fid/snapshot — Prompt 快照（Verifier 结果 + 命中词条）
+	play.GET("/sessions/:id/floors/:fid/snapshot", func(c *gin.Context) {
+		var snap dbmodels.PromptSnapshot
+		if err := engine.db.Where("floor_id = ?", c.Param("fid")).First(&snap).Error; err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "snapshot not found"})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"code": 0, "data": snap})
+	})
+
 	// GET /sessions/:id/tool-executions — 查询工具执行记录
 	play.GET("/sessions/:id/tool-executions", func(c *gin.Context) {
 		query := engine.db.Model(&dbmodels.ToolExecutionRecord{}).
@@ -311,5 +330,78 @@ func RegisterGameRoutes(rg *gin.RouterGroup, engine *GameEngine) {
 		var records []dbmodels.ToolExecutionRecord
 		query.Limit(limit).Find(&records)
 		c.JSON(http.StatusOK, gin.H{"code": 0, "data": records})
+	})
+
+	// ── Memory Edge 路由 ────────────────────────────────────────────────────────
+	// 记忆关系边（不参与 Prompt 注入，用于溯源和 Memory Lint）
+
+	// GET /sessions/:id/memory-edges — 列出会话的所有边（?relation=updates|contradicts|supports|resolves&limit=&offset=）
+	play.GET("/sessions/:id/memory-edges", func(c *gin.Context) {
+		limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
+		offset, _ := strconv.Atoi(c.DefaultQuery("offset", "0"))
+		relation := dbmodels.MemoryRelation(c.Query("relation"))
+		edges, err := engine.memStore.ListEdgesBySession(c.Param("id"), relation, limit, offset)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"code": 0, "data": edges})
+	})
+
+	// GET /sessions/:id/memories/:mid/edges — 列出某条记忆的所有双向边
+	play.GET("/sessions/:id/memories/:mid/edges", func(c *gin.Context) {
+		edges, err := engine.memStore.ListEdges(c.Param("id"), c.Param("mid"))
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"code": 0, "data": edges})
+	})
+
+	// POST /sessions/:id/memory-edges — 手动创建关系边（创作者调试用）
+	// Body: { "from_id": "uuid", "to_id": "uuid", "relation": "contradicts" }
+	play.POST("/sessions/:id/memory-edges", func(c *gin.Context) {
+		var req struct {
+			FromID   string                  `json:"from_id"  binding:"required"`
+			ToID     string                  `json:"to_id"    binding:"required"`
+			Relation dbmodels.MemoryRelation `json:"relation" binding:"required"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		edge, err := engine.memStore.SaveEdge(c.Param("id"), req.FromID, req.ToID, req.Relation)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"code": 0, "data": edge})
+	})
+
+	// PATCH /sessions/:id/memory-edges/:eid — 修改 relation 类型（标错时调试用）
+	// Body: { "relation": "supports" }
+	play.PATCH("/sessions/:id/memory-edges/:eid", func(c *gin.Context) {
+		var req struct {
+			Relation dbmodels.MemoryRelation `json:"relation" binding:"required"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		edge, err := engine.memStore.UpdateEdgeRelation(c.Param("id"), c.Param("eid"), req.Relation)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"code": 0, "data": edge})
+	})
+
+	// DELETE /sessions/:id/memory-edges/:eid — 删除关系边
+	play.DELETE("/sessions/:id/memory-edges/:eid", func(c *gin.Context) {
+		if err := engine.memStore.DeleteEdge(c.Param("id"), c.Param("eid")); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"code": 0, "data": gin.H{"deleted": true}})
 	})
 }
