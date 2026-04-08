@@ -202,7 +202,7 @@ func (w *Worker) processBatch(ctx context.Context) {
 // processSession 对单个 session 执行记忆整合。
 func (w *Worker) processSession(ctx context.Context, sessionID string, floorCount int) {
 	// 1. 拉取近期对话历史
-	history, err := w.sessionMgr.GetHistory(sessionID, 20)
+	history, err := w.sessionMgr.GetHistory(sessionID, "main", 20)
 	if err != nil {
 		log.Printf("[worker] get history %s: %v", sessionID, err)
 		return
@@ -231,7 +231,7 @@ func (w *Worker) processSession(ctx context.Context, sessionID string, floorCoun
 	}
 
 	// 5. 更新 session 摘要缓存（Pipeline 直读，0 延迟）
-	summary, _ := w.memStore.GetForInjection(sessionID, w.cfg.TokenBudget)
+	summary, _ := w.memStore.GetForInjection(sessionID, w.cfg.TokenBudget, "")
 	if err := w.memStore.UpdateSessionSummaryCache(sessionID, summary); err != nil {
 		log.Printf("[worker] update cache %s: %v", sessionID, err)
 		return

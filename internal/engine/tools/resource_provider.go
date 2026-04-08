@@ -652,7 +652,7 @@ func (t *floorHistoryTool) Execute(_ context.Context, params json.RawMessage) (s
 	t.db.Raw(`
 		SELECT f.seq, p.messages
 		FROM floors f
-		JOIN message_pages p ON p.floor_id = f.id AND p.is_active = true
+		JOIN message_pages p ON p.floor_id = f.id::text AND p.is_active = true
 		WHERE f.session_id = ? AND f.status = 'committed'
 		ORDER BY f.seq DESC
 		LIMIT ?

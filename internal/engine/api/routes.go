@@ -2,12 +2,14 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strconv"
 
 	"github.com/gin-gonic/gin"
 	dbmodels "mvu-backend/internal/core/db"
+	"mvu-backend/internal/engine/session"
 )
 
 // RegisterGameRoutes 注册游玩层接口（/api/v2/play/...）
@@ -49,6 +51,10 @@ func RegisterGameRoutes(rg *gin.RouterGroup, engine *GameEngine) {
 		req.SessionID = c.Param("id")
 		resp, err := engine.PlayTurn(c.Request.Context(), req)
 		if err != nil {
+			if errors.Is(err, session.ErrConcurrentGeneration) {
+				c.JSON(http.StatusConflict, gin.H{"error": err.Error(), "code": "concurrent_generation"})
+				return
+			}
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
@@ -65,6 +71,10 @@ func RegisterGameRoutes(rg *gin.RouterGroup, engine *GameEngine) {
 		req.IsRegen = true
 		resp, err := engine.PlayTurn(c.Request.Context(), req)
 		if err != nil {
+			if errors.Is(err, session.ErrConcurrentGeneration) {
+				c.JSON(http.StatusConflict, gin.H{"error": err.Error(), "code": "concurrent_generation"})
+				return
+			}
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
@@ -81,15 +91,15 @@ func RegisterGameRoutes(rg *gin.RouterGroup, engine *GameEngine) {
 	})
 
 	play.GET("/sessions/:id/stream", func(c *gin.Context) {
+		userInput := c.Query("input")
+		if userInput == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "input required"})
+			return
+		}
+
 		c.Header("Content-Type", "text/event-stream")
 		c.Header("Cache-Control", "no-cache")
 		c.Header("Connection", "keep-alive")
-
-		userInput := c.Query("input")
-		if userInput == "" {
-			c.SSEvent("error", "input required")
-			return
-		}
 
 		tokenCh, metaCh, errCh := engine.StreamTurn(c.Request.Context(), TurnRequest{
 			SessionID: c.Param("id"),
@@ -114,9 +124,17 @@ func RegisterGameRoutes(rg *gin.RouterGroup, engine *GameEngine) {
 				}
 				c.SSEvent("token", token)
 				return true
-			case err := <-errCh:
+			case err, ok := <-errCh:
+				// errCh 被 close 时（ok=false, err=nil）不视为错误，继续等 tokenCh
+				if !ok {
+					return true
+				}
 				if err != nil {
-					c.SSEvent("error", err.Error())
+					if errors.Is(err, session.ErrConcurrentGeneration) {
+						c.SSEvent("error", `{"code":"concurrent_generation","message":"`+err.Error()+`"}`)
+					} else {
+						c.SSEvent("error", err.Error())
+					}
 				}
 				return false
 			}
@@ -400,6 +418,37 @@ func RegisterGameRoutes(rg *gin.RouterGroup, engine *GameEngine) {
 	play.DELETE("/sessions/:id/memory-edges/:eid", func(c *gin.Context) {
 		if err := engine.memStore.DeleteEdge(c.Param("id"), c.Param("eid")); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"code": 0, "data": gin.H{"deleted": true}})
+	})
+
+	// ── Session 内分支（P-3G）──────────────────────────────────────────────────────
+
+	// GET /sessions/:id/branches — 列出所有分支（含 main）
+	play.GET("/sessions/:id/branches", func(c *gin.Context) {
+		branches, err := engine.ListBranches(c.Request.Context(), c.Param("id"))
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"code": 0, "data": branches})
+	})
+
+	// POST /sessions/:id/floors/:fid/branch — 从指定楼层创建新分支
+	play.POST("/sessions/:id/floors/:fid/branch", func(c *gin.Context) {
+		branchID, err := engine.CreateBranch(c.Request.Context(), c.Param("id"), c.Param("fid"))
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"code": 0, "data": gin.H{"branch_id": branchID}})
+	})
+
+	// DELETE /sessions/:id/branches/:bid — 删除分支（不能删 main）
+	play.DELETE("/sessions/:id/branches/:bid", func(c *gin.Context) {
+		if err := engine.DeleteBranch(c.Request.Context(), c.Param("id"), c.Param("bid")); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"code": 0, "data": gin.H{"deleted": true}})

@@ -5,7 +5,9 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
+	"mvu-backend/internal/engine/macros"
 	"mvu-backend/internal/engine/prompt_ir"
 )
 
@@ -104,17 +106,42 @@ func (n *WorldbookNode) Process(ctx *prompt_ir.ContextData) error {
 	// cap 由 GameConfig.WorldbookGroupCap 配置（默认 1，即每组只保留权重最高的词条）。
 	activated = applyGroupCap(activated, ctx.Config.WorldbookGroupCap)
 
+	// ── Token 预算裁剪 ──────────────────────────────────────────
+	// 若 WorldbookTokenBudget > 0，则在 GroupCap 之后再做一次全局 token 裁剪：
+	// Constant=true 的词条 pinned，不计入预算；其余词条按 Priority 升序保留。
+	if ctx.Config.WorldbookTokenBudget > 0 {
+		activated = applyTokenBudget(activated, ctx.Config.WorldbookTokenBudget)
+	}
+
+	macroCtx := macros.MacroContext{
+		CharName:    ctx.CharName,
+		UserName:    ctx.UserName,
+		PersonaName: ctx.PersonaName,
+		Variables:   ctx.Variables,
+		Now:         time.Now(),
+	}
+
 	// ── 组装 PromptBlocks + 记录命中 ID ───────────────────────
 	for _, entry := range activated {
-		content := n.resolveMacros(entry.Content, ctx.Variables)
-		priority := positionToPriority(entry.Position, entry.Priority)
+		content := macros.Expand(entry.Content, macroCtx)
 
-		ctx.Blocks = append(ctx.Blocks, prompt_ir.PromptBlock{
-			Type:     prompt_ir.BlockWorldbook,
-			Role:     "system",
-			Content:  content,
-			Priority: priority,
-		})
+		if entry.Position == "at_depth" {
+			// at_depth 词条：不进入普通 Block 排序，由 Runner 插入历史特定位置
+			ctx.AtDepthBlocks = append(ctx.AtDepthBlocks, prompt_ir.AtDepthBlock{
+				Content:  content,
+				Depth:    entry.Depth,
+				Priority: entry.Priority,
+				EntryID:  entry.ID,
+			})
+		} else {
+			priority := positionToPriority(entry.Position, entry.Priority)
+			ctx.Blocks = append(ctx.Blocks, prompt_ir.PromptBlock{
+				Type:     prompt_ir.BlockWorldbook,
+				Role:     "system",
+				Content:  content,
+				Priority: priority,
+			})
+		}
 		// 暴露命中词条 ID，供 PromptSnapshot 持久化使用
 		if entry.ID != "" {
 			ctx.ActivatedWorldbookIDs = append(ctx.ActivatedWorldbookIDs, entry.ID)
@@ -256,16 +283,6 @@ func positionToPriority(position string, offset int) int {
 	}
 }
 
-func (n *WorldbookNode) resolveMacros(text string, vars map[string]any) string {
-	res := text
-	for k, v := range vars {
-		if strVal, ok := v.(string); ok {
-			res = strings.ReplaceAll(res, "{{"+k+"}}", strVal)
-		}
-	}
-	return res
-}
-
 // applyGroupCap 对同组词条做互斥裁剪：
 // 每个非空 Group 内，按 GroupWeight 降序排列，只保留前 cap 条。
 // cap <= 0 时视为 1（默认每组最多保留一条）。
@@ -296,5 +313,61 @@ func applyGroupCap(entries []prompt_ir.WorldbookEntry, cap int) []prompt_ir.Worl
 		}
 		result = append(result, group...)
 	}
+	return result
+}
+
+// estimateTokens 估算文本的 token 数量。
+// 使用字符数（rune）/ 4 取上整，与 TH SimpleTokenCounter 策略一致。
+// 对于 CJK 字符，每字约 1-1.5 token，此估算偏保守，可接受。
+func estimateTokens(text string) int {
+	n := len([]rune(text))
+	return (n + 3) / 4
+}
+
+// applyTokenBudget 按 token 总预算裁剪词条列表。
+//
+// 策略（对齐 TH token-budget.ts）：
+//  1. Constant=true 的词条视为 pinned，始终保留，不占用预算。
+//  2. 其余词条按 Priority 升序排序（数值越小 = 越重要，优先保留）。
+//  3. 从小到大累加 token 数，直到超出预算，超出部分丢弃。
+//
+// budget <= 0 时不裁剪（调用方应提前判断，此处做防御处理）。
+func applyTokenBudget(entries []prompt_ir.WorldbookEntry, budget int) []prompt_ir.WorldbookEntry {
+	if budget <= 0 {
+		return entries
+	}
+
+	// 分离 pinned（常驻）和 prunable（可裁剪）
+	var pinned []prompt_ir.WorldbookEntry
+	var prunable []prompt_ir.WorldbookEntry
+	for _, e := range entries {
+		if e.Constant {
+			pinned = append(pinned, e)
+		} else {
+			prunable = append(prunable, e)
+		}
+	}
+
+	// prunable 按 Priority 升序（数值小 = 重要性高，先保留）
+	sort.Slice(prunable, func(i, j int) bool {
+		return prunable[i].Priority < prunable[j].Priority
+	})
+
+	// 贪心保留：累加 token，超出预算后停止
+	used := 0
+	kept := prunable[:0:0] // 复用底层数组但长度为 0
+	for _, e := range prunable {
+		cost := estimateTokens(e.Content)
+		if used+cost > budget {
+			continue // 丢弃：超出预算
+		}
+		used += cost
+		kept = append(kept, e)
+	}
+
+	// 合并：pinned 在前（无条件），kept 在后
+	result := make([]prompt_ir.WorldbookEntry, 0, len(pinned)+len(kept))
+	result = append(result, pinned...)
+	result = append(result, kept...)
 	return result
 }

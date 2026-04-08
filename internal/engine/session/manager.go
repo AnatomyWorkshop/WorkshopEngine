@@ -2,12 +2,19 @@ package session
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"math/rand"
 	"time"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 	dbmodels "mvu-backend/internal/core/db"
 )
+
+// ErrConcurrentGeneration 当 session.generating=true 且 generation_mode=reject 时返回此错误。
+// 调用方（路由层）应将其转换为 HTTP 409 Conflict。
+var ErrConcurrentGeneration = errors.New("session is currently generating; retry later")
 
 // Manager 管理 Floor / MessagePage 的生命周期
 type Manager struct {
@@ -19,45 +26,83 @@ func NewManager(db *gorm.DB) *Manager {
 }
 
 // StartTurn 开始一个新回合
-// 1. 创建 Floor（draft）
-// 2. 创建第一个 MessagePage（active）
-// 3. 将 Floor 状态推进到 generating
-func (m *Manager) StartTurn(sessionID, userInput string) (floorID, pageID string, err error) {
-	// 计算下一个楼层序号
-	var maxSeq int
-	m.db.Model(&dbmodels.Floor{}).
-		Where("session_id = ?", sessionID).
-		Select("COALESCE(MAX(seq), 0)").
-		Scan(&maxSeq)
-
-	floor := dbmodels.Floor{
-		SessionID: sessionID,
-		Seq:       maxSeq + 1,
-		Status:    dbmodels.FloorDraft,
+//
+// branchID 指定本回合属于哪个分支（空字符串或 "main" 均视为主干）。
+// 并发保护（M13）：在 DB 事务内以 FOR UPDATE 锁住 session 行，若 generating=true 返回 ErrConcurrentGeneration。
+func (m *Manager) StartTurn(sessionID, userInput, branchID string) (floorID, pageID string, err error) {
+	if branchID == "" {
+		branchID = "main"
 	}
-	if err = m.db.Create(&floor).Error; err != nil {
-		return "", "", fmt.Errorf("create floor: %w", err)
-	}
+	var floorRes, pageRes string
 
-	// 用户输入作为第一条消息写入 Page
-	msgs, _ := json.Marshal([]map[string]string{
-		{"role": "user", "content": userInput},
+	txErr := m.db.Transaction(func(tx *gorm.DB) error {
+		var sess dbmodels.GameSession
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			First(&sess, "id = ?", sessionID).Error; err != nil {
+			return fmt.Errorf("session not found: %w", err)
+		}
+
+		if sess.Generating {
+			mode := sess.GenerationMode
+			if mode == "" {
+				mode = "reject"
+			}
+			return ErrConcurrentGeneration
+		}
+
+		if err := tx.Model(&sess).Update("generating", true).Error; err != nil {
+			return fmt.Errorf("set generating: %w", err)
+		}
+
+		var maxSeq int
+		tx.Model(&dbmodels.Floor{}).
+			Where("session_id = ?", sessionID).
+			Select("COALESCE(MAX(seq), 0)").
+			Scan(&maxSeq)
+
+		floor := dbmodels.Floor{
+			SessionID: sessionID,
+			Seq:       maxSeq + 1,
+			BranchID:  branchID,
+			Status:    dbmodels.FloorDraft,
+		}
+		if err := tx.Create(&floor).Error; err != nil {
+			return fmt.Errorf("create floor: %w", err)
+		}
+
+		msgs, _ := json.Marshal([]map[string]string{
+			{"role": "user", "content": userInput},
+		})
+		page := dbmodels.MessagePage{
+			FloorID:  floor.ID,
+			IsActive: true,
+			Messages: msgs,
+			PageVars: []byte("{}"),
+		}
+		if err := tx.Create(&page).Error; err != nil {
+			return fmt.Errorf("create page: %w", err)
+		}
+
+		tx.Model(&floor).Update("status", dbmodels.FloorGenerating)
+
+		floorRes = floor.ID
+		pageRes = page.ID
+		return nil
 	})
 
-	page := dbmodels.MessagePage{
-		FloorID:  floor.ID,
-		IsActive: true,
-		Messages: msgs,
-		PageVars: []byte("{}"),
+	if txErr != nil {
+		return "", "", txErr
 	}
-	if err = m.db.Create(&page).Error; err != nil {
-		return "", "", fmt.Errorf("create page: %w", err)
-	}
+	return floorRes, pageRes, nil
+}
 
-	// 推进状态到 generating
-	m.db.Model(&floor).Update("status", dbmodels.FloorGenerating)
-
-	return floor.ID, page.ID, nil
+// ClearGenerating 将 session.generating 复位为 false。
+// 应在 CommitTurn / FailTurn 后调用（由 game_loop / StreamTurn 负责，而非 Manager 内部，
+// 以避免在事务外部做额外查询）。
+func (m *Manager) ClearGenerating(sessionID string) {
+	m.db.Model(&dbmodels.GameSession{}).
+		Where("id = ?", sessionID).
+		Update("generating", false)
 }
 
 // CommitTurn 生成成功：写入 AI 回复，更新变量，锁定楼层
@@ -132,17 +177,52 @@ func (m *Manager) FailTurn(floorID string, reason string) error {
 		}).Error
 }
 
-// GetHistory 获取会话中所有已提交楼层的消息（用于构建 LLM 上下文）
-func (m *Manager) GetHistory(sessionID string, maxFloors int) ([]map[string]string, error) {
+// GetHistory 获取会话已提交楼层的消息（用于构建 LLM 上下文）。
+//
+// branchID 为空或 "main" 时只返回主干楼层。
+// 非 main 分支时，返回父分支 ≤ OriginSeq 的楼层 + 本分支所有楼层（按 seq 升序合并）。
+func (m *Manager) GetHistory(sessionID, branchID string, maxFloors int) ([]map[string]string, error) {
+	if branchID == "" {
+		branchID = "main"
+	}
+
 	var pages []dbmodels.MessagePage
-	err := m.db.
-		Joins("JOIN floors ON floors.id = message_pages.floor_id").
-		Where("floors.session_id = ? AND floors.status = ? AND message_pages.is_active = true", sessionID, dbmodels.FloorCommitted).
-		Order("floors.seq ASC").
-		Limit(maxFloors).
-		Find(&pages).Error
-	if err != nil {
-		return nil, err
+	if branchID == "main" {
+		err := m.db.
+			Joins("JOIN floors ON floors.id::text = message_pages.floor_id").
+			Where("floors.session_id = ? AND floors.status = ? AND floors.branch_id = ? AND message_pages.is_active = true",
+				sessionID, dbmodels.FloorCommitted, "main").
+			Order("floors.seq ASC").
+			Limit(maxFloors).
+			Find(&pages).Error
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		// 查分支元数据，得到父分支和分叉点 seq
+		var meta dbmodels.SessionBranch
+		if err := m.db.Where("session_id = ? AND branch_id = ?", sessionID, branchID).
+			First(&meta).Error; err != nil {
+			return nil, fmt.Errorf("branch not found: %w", err)
+		}
+
+		// 父分支楼层（seq ≤ OriginSeq）+ 本分支所有楼层，按 seq 升序
+		err := m.db.
+			Joins("JOIN floors ON floors.id::text = message_pages.floor_id").
+			Where(`floors.session_id = ? AND floors.status = ? AND message_pages.is_active = true
+			  AND (
+			    (floors.branch_id = ? AND floors.seq <= ?)
+			    OR floors.branch_id = ?
+			  )`,
+				sessionID, dbmodels.FloorCommitted,
+				meta.ParentBranch, meta.OriginSeq,
+				branchID).
+			Order("floors.seq ASC").
+			Limit(maxFloors).
+			Find(&pages).Error
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	var history []map[string]string
@@ -226,11 +306,15 @@ type FloorWithPage struct {
 	TokenUsed    int            `json:"token_used"`
 }
 
-// ListFloors 返回会话的所有楼层（按 seq 升序），每条附带当前激活页的消息摘要。
-func (m *Manager) ListFloors(sessionID string) ([]FloorWithPage, error) {
+// ListFloors 返回会话的所有楼层（按 seq 升序）。
+// branchID 为空时返回全部分支的楼层；非空时只返回该分支的楼层。
+func (m *Manager) ListFloors(sessionID, branchID string) ([]FloorWithPage, error) {
+	q := m.db.Where("session_id = ?", sessionID)
+	if branchID != "" {
+		q = q.Where("branch_id = ?", branchID)
+	}
 	var floors []dbmodels.Floor
-	if err := m.db.Where("session_id = ?", sessionID).
-		Order("seq ASC").Find(&floors).Error; err != nil {
+	if err := q.Order("seq ASC").Find(&floors).Error; err != nil {
 		return nil, err
 	}
 
@@ -292,4 +376,103 @@ func (m *Manager) SetActivePage(floorID, pageID string) error {
 		}
 	}
 	return nil
+}
+
+// ── 分支管理（P-3G）────────────────────────────────────────────────────────────
+
+// BranchInfo 分支信息（用于 GET /sessions/:id/branches 响应）
+type BranchInfo struct {
+	BranchID     string    `json:"branch_id"`
+	ParentBranch string    `json:"parent_branch"`
+	OriginSeq    int       `json:"origin_seq"`
+	FloorCount   int       `json:"floor_count"`
+	CreatedAt    time.Time `json:"created_at"`
+}
+
+// ListBranches 列出 session 的所有分支（含隐式 main 分支）。
+func (m *Manager) ListBranches(sessionID string) ([]BranchInfo, error) {
+	// main 分支：统计所有 branch_id="main" 的楼层数
+	var mainCount int64
+	m.db.Model(&dbmodels.Floor{}).
+		Where("session_id = ? AND branch_id = 'main'", sessionID).
+		Count(&mainCount)
+
+	result := []BranchInfo{{
+		BranchID:     "main",
+		ParentBranch: "",
+		OriginSeq:    0,
+		FloorCount:   int(mainCount),
+	}}
+
+	// 非 main 分支
+	var metas []dbmodels.SessionBranch
+	if err := m.db.Where("session_id = ?", sessionID).
+		Order("created_at ASC").Find(&metas).Error; err != nil {
+		return nil, err
+	}
+	for _, meta := range metas {
+		var cnt int64
+		m.db.Model(&dbmodels.Floor{}).
+			Where("session_id = ? AND branch_id = ?", sessionID, meta.BranchID).
+			Count(&cnt)
+		result = append(result, BranchInfo{
+			BranchID:     meta.BranchID,
+			ParentBranch: meta.ParentBranch,
+			OriginSeq:    meta.OriginSeq,
+			FloorCount:   int(cnt),
+			CreatedAt:    meta.CreatedAt,
+		})
+	}
+	return result, nil
+}
+
+// CreateBranch 从 fid 所属楼层的 seq 创建新分支，返回新 branch_id。
+func (m *Manager) CreateBranch(sessionID, fromFloorID string) (string, error) {
+	var floor dbmodels.Floor
+	if err := m.db.First(&floor, "id = ? AND session_id = ?", fromFloorID, sessionID).Error; err != nil {
+		return "", fmt.Errorf("floor not found: %w", err)
+	}
+	if floor.BranchID != "main" {
+		return "", fmt.Errorf("can only branch from main branch floors (got branch_id=%q)", floor.BranchID)
+	}
+
+	// 生成唯一 branch_id（时间戳 + 随机 4 位 hex）
+	branchID := fmt.Sprintf("branch-%d%04x", time.Now().UnixMilli()%100000, rand.Intn(0x10000))
+
+	meta := dbmodels.SessionBranch{
+		SessionID:    sessionID,
+		BranchID:     branchID,
+		ParentBranch: "main",
+		OriginSeq:    floor.Seq,
+	}
+	if err := m.db.Create(&meta).Error; err != nil {
+		return "", fmt.Errorf("create branch: %w", err)
+	}
+	return branchID, nil
+}
+
+// DeleteBranch 删除指定分支（不能删除 main）。
+// 同时删除该分支下的所有 Floor 和 MessagePage。
+func (m *Manager) DeleteBranch(sessionID, branchID string) error {
+	if branchID == "main" || branchID == "" {
+		return fmt.Errorf("cannot delete main branch")
+	}
+	// 验证分支存在
+	var meta dbmodels.SessionBranch
+	if err := m.db.Where("session_id = ? AND branch_id = ?", sessionID, branchID).
+		First(&meta).Error; err != nil {
+		return fmt.Errorf("branch not found: %w", err)
+	}
+
+	// 删除分支下所有楼层的页面
+	var floors []dbmodels.Floor
+	m.db.Where("session_id = ? AND branch_id = ?", sessionID, branchID).Find(&floors)
+	for _, f := range floors {
+		m.db.Where("floor_id = ?", f.ID).Delete(&dbmodels.MessagePage{})
+	}
+	m.db.Where("session_id = ? AND branch_id = ?", sessionID, branchID).Delete(&dbmodels.Floor{})
+
+	// 删除分支元数据
+	return m.db.Where("session_id = ? AND branch_id = ?", sessionID, branchID).
+		Delete(&dbmodels.SessionBranch{}).Error
 }

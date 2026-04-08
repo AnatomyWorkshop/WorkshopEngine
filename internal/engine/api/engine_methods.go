@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/rand"
+	"strings"
 
 	"gorm.io/gorm"
 	dbmodels "mvu-backend/internal/core/db"
@@ -20,25 +21,201 @@ import (
 	"mvu-backend/internal/engine/variable"
 )
 
-// CreateSession 创建新的游玩会话
+// CreateSession 创建新的游玩会话，并自动注入游戏包的 first_mes 作为开场楼层
 func (e *GameEngine) CreateSession(ctx context.Context, gameID, userID string) (string, error) {
+	// 查游戏模板，读取 _meta.first_mes
+	var tmpl dbmodels.GameTemplate
+	if err := e.db.First(&tmpl, "id = ?", gameID).Error; err != nil {
+		return "", fmt.Errorf("game not found: %w", err)
+	}
+
+	// 从 Config 或 template 字段读取 first_mes
+	firstMes := extractFirstMes(tmpl)
+
+	// 解析模板 Config 中的角色卡相关字段（M11）
+	var cfgMeta struct {
+		CharacterCardID    string `json:"character_card_id"`
+		CharSyncPolicy     string `json:"character_sync_policy"` // "pin"（默认）| "latest"
+	}
+	_ = json.Unmarshal(tmpl.Config, &cfgMeta)
+
 	sess := dbmodels.GameSession{
 		GameID:    gameID,
 		UserID:    userID,
 		Variables: []byte("{}"),
 	}
+
+	// 若模板指定了角色卡，预加载并在 pin 策略下写入快照（M11）
+	if cfgMeta.CharacterCardID != "" {
+		sess.CharacterCardID = cfgMeta.CharacterCardID
+		// pin（默认）：冻结创建时的角色卡版本
+		if cfgMeta.CharSyncPolicy == "" || cfgMeta.CharSyncPolicy == "pin" {
+			var card dbmodels.CharacterCard
+			if err := e.db.First(&card, "id = ?", cfgMeta.CharacterCardID).Error; err == nil {
+				if snap, err := json.Marshal(card); err == nil {
+					sess.CharacterSnapshot = snap
+				}
+			}
+			// 加载失败时静默跳过（不阻断会话创建）
+		}
+	}
+
 	if err := e.db.Create(&sess).Error; err != nil {
 		return "", fmt.Errorf("create session: %w", err)
 	}
+
+	// 注入 first_mes 作为已提交楼层（用户消息为空，AI 内容为 first_mes）
+	if firstMes != "" {
+		msgs, _ := json.Marshal([]map[string]string{
+			{"role": "assistant", "content": firstMes},
+		})
+		floor := dbmodels.Floor{
+			SessionID: sess.ID,
+			Seq:       0,
+			BranchID:  "main",
+			Status:    dbmodels.FloorCommitted,
+		}
+		if err := e.db.Create(&floor).Error; err == nil {
+			page := dbmodels.MessagePage{
+				FloorID:  floor.ID,
+				IsActive: true,
+				Messages: msgs,
+			}
+			e.db.Create(&page)
+			e.db.Model(&sess).Update("floor_count", 1)
+		}
+	}
+
 	return sess.ID, nil
+}
+
+// extractFirstMes 从游戏模板里提取 first_mes（存于 Config JSONB 的 first_mes 字段）
+func extractFirstMes(tmpl dbmodels.GameTemplate) string {
+	if len(tmpl.Config) == 0 {
+		return ""
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(tmpl.Config, &cfg); err != nil {
+		return ""
+	}
+	if v, ok := cfg["first_mes"].(string); ok {
+		return v
+	}
+	return ""
+}
+
+// buildCharacterDescriptionFromCardData 从角色卡 Data JSONB 中提取 description / personality / scenario 字段，
+// 拼接为适合注入 System Prompt 的文本块。
+//
+// 兼容 ST V2 / V3 格式：
+//   - V2: { data: { description, personality, scenario } }
+//   - V3: { data: { character_description, personality_description, scenario_description } } （备用路径）
+//
+// 若所有字段均为空，返回空字符串（CharacterInjectionNode 会静默跳过）。
+func buildCharacterDescriptionFromCardData(cardData []byte, charName string) string {
+	if len(cardData) == 0 {
+		return ""
+	}
+	// ST V2/V3 的 Data 字段结构：顶层是 { data: { ... } }
+	var outer struct {
+		Data struct {
+			Description         string `json:"description"`
+			Personality         string `json:"personality"`
+			Scenario            string `json:"scenario"`
+			// V3 备用字段名
+			CharacterDescription  string `json:"character_description"`
+			PersonalityDescription string `json:"personality_description"`
+			ScenarioDescription    string `json:"scenario_description"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(cardData, &outer); err != nil {
+		return ""
+	}
+	d := outer.Data
+
+	// 优先 V2 字段，回退 V3 字段名
+	description := d.Description
+	if description == "" {
+		description = d.CharacterDescription
+	}
+	personality := d.Personality
+	if personality == "" {
+		personality = d.PersonalityDescription
+	}
+	scenario := d.Scenario
+	if scenario == "" {
+		scenario = d.ScenarioDescription
+	}
+
+	if description == "" && personality == "" && scenario == "" {
+		return ""
+	}
+
+	var sb strings.Builder
+	if charName != "" {
+		sb.WriteString("[Character: ")
+		sb.WriteString(charName)
+		sb.WriteString("]\n")
+	}
+	if description != "" {
+		sb.WriteString(description)
+		sb.WriteByte('\n')
+	}
+	if personality != "" {
+		sb.WriteString("\n[Personality]\n")
+		sb.WriteString(personality)
+		sb.WriteByte('\n')
+	}
+	if scenario != "" {
+		sb.WriteString("\n[Scenario]\n")
+		sb.WriteString(scenario)
+		sb.WriteByte('\n')
+	}
+	return strings.TrimSpace(sb.String())
+}
+
+// loadCharacterDescription 加载 session 绑定的角色卡描述文本（M11）。
+//
+// 优先级：
+//  1. session.CharacterSnapshot 非空（pin 策略，已在创建时冻结）→ 直接用快照
+//  2. session.CharacterCardID 非空（latest 策略）→ 从 DB 加载最新角色卡
+//  3. 均为空 → 返回空字符串（CharacterInjectionNode 静默跳过）
+//
+// charName 用于章节标头；若为空则不写标头。
+// 失败时静默返回空字符串，不阻断回合。
+func (e *GameEngine) loadCharacterDescription(sess dbmodels.GameSession, charName string) string {
+	// 1. 有快照（pin 策略）
+	if len(sess.CharacterSnapshot) > 0 && string(sess.CharacterSnapshot) != "null" {
+		var card dbmodels.CharacterCard
+		if err := json.Unmarshal(sess.CharacterSnapshot, &card); err == nil {
+			name := charName
+			if name == "" {
+				name = card.Name
+			}
+			return buildCharacterDescriptionFromCardData(card.Data, name)
+		}
+	}
+	// 2. 有 ID（latest 策略）
+	if sess.CharacterCardID != "" {
+		var card dbmodels.CharacterCard
+		if err := e.db.First(&card, "id = ?", sess.CharacterCardID).Error; err == nil {
+			name := charName
+			if name == "" {
+				name = card.Name
+			}
+			return buildCharacterDescriptionFromCardData(card.Data, name)
+		}
+	}
+	return ""
 }
 
 // StateResponse 游戏快照（变量 + 最近历史）
 type StateResponse struct {
-	SessionID     string         `json:"session_id"`
-	Variables     map[string]any `json:"variables"`
-	MemorySummary string         `json:"memory_summary"`
-	FloorCount    int            `json:"floor_count"`
+	SessionID     string              `json:"session_id"`
+	Title         string              `json:"title"`
+	Variables     map[string]any      `json:"variables"`
+	MemorySummary string              `json:"memory_summary"`
+	FloorCount    int                 `json:"floor_count"`
 	RecentHistory []map[string]string `json:"recent_history"`
 }
 
@@ -52,10 +229,11 @@ func (e *GameEngine) GetState(ctx context.Context, sessionID string) (*StateResp
 	var vars map[string]any
 	_ = json.Unmarshal(sess.Variables, &vars)
 
-	history, _ := e.sessions.GetHistory(sessionID, e.maxHistoryFloors)
+	history, _ := e.sessions.GetHistory(sessionID, "main", e.maxHistoryFloors)
 
 	return &StateResponse{
 		SessionID:     sessionID,
+		Title:         sess.Title,
 		Variables:     vars,
 		MemorySummary: sess.MemorySummary,
 		FloorCount:    sess.FloorCount,
@@ -115,7 +293,7 @@ func (e *GameEngine) StreamTurn(ctx context.Context, req TurnRequest) (<-chan st
 		e.db.Where("game_id = ? AND enabled = true", sess.GameID).
 			Order("injection_order ASC").Find(&presetEntries)
 		var dbRegexRules []dbmodels.RegexRule
-		e.db.Joins("JOIN regex_profiles ON regex_rules.profile_id = regex_profiles.id").
+		e.db.Joins("JOIN regex_profiles ON regex_rules.profile_id = regex_profiles.id::text").
 			Where("regex_profiles.game_id = ? AND regex_profiles.enabled = true AND regex_rules.enabled = true", sess.GameID).
 			Order("regex_rules.order ASC").Find(&dbRegexRules)
 
@@ -128,6 +306,10 @@ func (e *GameEngine) StreamTurn(ctx context.Context, req TurnRequest) (<-chan st
 			DirectorPrompt    string                  `json:"director_prompt"`
 			VerifierPrompt    string                  `json:"verifier_prompt"` // 可选，Verifier 槽校验指令
 			WorldbookGroupCap int                     `json:"worldbook_group_cap"`
+			WorldbookTokenBudget int                  `json:"worldbook_token_budget"`
+			CharName    string `json:"char_name"`
+			PlayerName  string `json:"player_name"`
+			PersonaName string `json:"persona_name"`
 		}
 		_ = json.Unmarshal(template.Config, &tmplCfg)
 
@@ -189,6 +371,7 @@ func (e *GameEngine) StreamTurn(ctx context.Context, req TurnRequest) (<-chan st
 				SecondaryLogic: entry.SecondaryLogic, Content: entry.Content,
 				Constant: entry.Constant, Priority: entry.Priority,
 				ScanDepth: entry.ScanDepth, Position: entry.Position,
+				Depth: entry.Depth,
 				WholeWord: entry.WholeWord, Enabled: entry.Enabled,
 				Group: entry.Group, GroupWeight: entry.GroupWeight,
 			})
@@ -211,7 +394,7 @@ func (e *GameEngine) StreamTurn(ctx context.Context, req TurnRequest) (<-chan st
 		}
 
 		// ── 6. 历史 + 用户输入（先经 regex 预处理）────────────────
-		history, _ := e.sessions.GetHistory(req.SessionID, e.maxHistoryFloors)
+		history, _ := e.sessions.GetHistory(req.SessionID, req.BranchID, e.maxHistoryFloors)
 		userInput := processor.ApplyToUserInput(req.UserInput, regexRules)
 		var recentMsgs []prompt_ir.Message
 		for _, m := range history {
@@ -226,15 +409,25 @@ func (e *GameEngine) StreamTurn(ctx context.Context, req TurnRequest) (<-chan st
 				SystemPromptTemplate: template.SystemPromptTemplate,
 				WorldbookEntries:     wbIR,
 				PresetEntries:        presetIR,
-				MemorySummary:        sess.MemorySummary,
+				MemorySummary: func() string {
+					stage, _ := chatVars["game_stage"].(string)
+					s, _ := e.memStore.GetForInjection(req.SessionID, e.memoryTokenBudget, stage)
+					return s
+				}(),
 				MemoryLabel:          tmplCfg.MemoryLabel,
 				FallbackOptions:      tmplCfg.FallbackOptions,
 				RegexRules:           regexRules,
 				WorldbookGroupCap:    tmplCfg.WorldbookGroupCap,
+			WorldbookTokenBudget: tmplCfg.WorldbookTokenBudget,
 			},
 			Variables:      sb.Flatten(),
 			RecentMessages: recentMsgs,
 			TokenBudget:    e.tokenBudget,
+			CharName:    tmplCfg.CharName,
+			UserName:    tmplCfg.PlayerName,
+			PersonaName: tmplCfg.PersonaName,
+			// 角色卡注入（M11）
+			CharacterDescription: e.loadCharacterDescription(sess, tmplCfg.CharName),
 		}
 		runner := pipeline.NewRunner()
 		finalMessages, err := runner.Execute(pipelineCtx)
@@ -257,7 +450,7 @@ func (e *GameEngine) StreamTurn(ctx context.Context, req TurnRequest) (<-chan st
 			floorID = floor.ID
 			pageID, err = e.sessions.RegenTurn(floorID, req.UserInput)
 		} else {
-			floorID, pageID, err = e.sessions.StartTurn(req.SessionID, req.UserInput)
+		floorID, pageID, err = e.sessions.StartTurn(req.SessionID, req.UserInput, req.BranchID)
 		}
 		if err != nil {
 			errCh <- fmt.Errorf("session turn: %w", err)
@@ -277,7 +470,7 @@ func (e *GameEngine) StreamTurn(ctx context.Context, req TurnRequest) (<-chan st
 			if baseURL == "" {
 				baseURL = e.llmClient.BaseURL()
 			}
-			client = llm.NewClient(baseURL, req.APIKey, llmOpts.Model, 60, 2)
+			client = llm.NewClient(baseURL, req.APIKey, llmOpts.Model, e.llmTimeoutSec, e.llmMaxRetries)
 		}
 
 		var llmMsgs []llm.Message
@@ -308,14 +501,14 @@ func (e *GameEngine) StreamTurn(ctx context.Context, req TurnRequest) (<-chan st
 			llmOpts.Tools = defs
 		}
 
-		// ── 10a. Agentic 工具循环（非流式，最多 5 轮）────────────────
+		// ── 10a. Agentic 工具循环（非流式）────────────────────────────
 		// 先以非流式方式完成所有工具调用，再对最终回复做流式推送。
-		const maxToolIter = 5
 		var toolResp *llm.Response
-		for iter := 0; iter < maxToolIter; iter++ {
+		for iter := 0; iter < e.maxToolIter; iter++ {
 			toolResp, err = client.Chat(ctx, llmMsgs, llmOpts)
 			if err != nil {
 				_ = e.sessions.FailTurn(floorID, err.Error())
+				e.sessions.ClearGenerating(req.SessionID)
 				errCh <- fmt.Errorf("llm tool round: %w", err)
 				return
 			}
@@ -364,17 +557,20 @@ func (e *GameEngine) StreamTurn(ctx context.Context, req TurnRequest) (<-chan st
 				case tokenCh <- token:
 				case <-ctx.Done():
 					_ = e.sessions.FailTurn(floorID, "context cancelled")
+					e.sessions.ClearGenerating(req.SessionID)
 					return
 				}
 			case err = <-streamErrCh:
 				if err != nil {
 					_ = e.sessions.FailTurn(floorID, err.Error())
+					e.sessions.ClearGenerating(req.SessionID)
 					errCh <- err
 					return
 				}
 				streamDone = true
 			case <-ctx.Done():
 				_ = e.sessions.FailTurn(floorID, "context cancelled")
+				e.sessions.ClearGenerating(req.SessionID)
 				return
 			}
 		}
@@ -402,9 +598,13 @@ func (e *GameEngine) StreamTurn(ctx context.Context, req TurnRequest) (<-chan st
 
 		// ── 13. CommitTurn ────────────────────────────────────────
 		if err = e.sessions.CommitTurn(pageID, fullContent, sb.Flatten()); err != nil {
+			e.sessions.ClearGenerating(req.SessionID)
 			errCh <- fmt.Errorf("commit turn: %w", err)
 			return
 		}
+
+		// ── 13b. 清除并发锁 ──────────────────────────────────────
+		e.sessions.ClearGenerating(req.SessionID)
 
 		// ── 14. 同步递增楼层计数 ───────────────────────────────────
 		count, _ := e.sessions.IncrFloorCount(req.SessionID)
@@ -588,6 +788,7 @@ func (e *GameEngine) ForkSession(_ context.Context, sourceID string, req ForkSes
 			newFloor := dbmodels.Floor{
 				SessionID: newSessID,
 				Seq:       floor.Seq,
+				BranchID:  "main",
 				Status:    dbmodels.FloorCommitted,
 			}
 			if err := tx.Create(&newFloor).Error; err != nil {
@@ -664,7 +865,24 @@ func (e *GameEngine) ListSessions(_ context.Context, req ListSessionsReq) ([]dbm
 
 // ListFloors 返回会话的楼层列表（含当前激活页摘要）
 func (e *GameEngine) ListFloors(_ context.Context, sessionID string) ([]session.FloorWithPage, error) {
-	return e.sessions.ListFloors(sessionID)
+	return e.sessions.ListFloors(sessionID, "")
+}
+
+// ── 分支管理（P-3G）────────────────────────────────────────────────────────────
+
+// ListBranches 列出 session 的所有分支（含隐式 main）
+func (e *GameEngine) ListBranches(_ context.Context, sessionID string) ([]session.BranchInfo, error) {
+	return e.sessions.ListBranches(sessionID)
+}
+
+// CreateBranch 从指定 floor 创建新分支，返回 branch_id
+func (e *GameEngine) CreateBranch(_ context.Context, sessionID, fromFloorID string) (string, error) {
+	return e.sessions.CreateBranch(sessionID, fromFloorID)
+}
+
+// DeleteBranch 删除指定分支（不能删除 main）
+func (e *GameEngine) DeleteBranch(_ context.Context, sessionID, branchID string) error {
+	return e.sessions.DeleteBranch(sessionID, branchID)
 }
 
 // ListPages 返回单个楼层的所有 Swipe 页
@@ -686,9 +904,10 @@ func (e *GameEngine) ListMemories(_ context.Context, sessionID string) ([]dbmode
 
 // CreateMemoryReq POST /memories 请求体
 type CreateMemoryReq struct {
-	Content    string  `json:"content"    binding:"required"`
-	Type       string  `json:"type"`       // fact | summary | open_loop，默认 fact
-	Importance float64 `json:"importance"` // 0–1，默认 0.9
+	Content    string   `json:"content"     binding:"required"`
+	Type       string   `json:"type"`        // fact | summary | open_loop，默认 fact
+	Importance float64  `json:"importance"`  // 0–1，默认 0.9
+	StageTags  []string `json:"stage_tags"`  // 阶段标签（空 = 无阶段限制）
 }
 
 // CreateMemory 手动创建记忆条目（创作者/调试用）
@@ -701,11 +920,17 @@ func (e *GameEngine) CreateMemory(_ context.Context, sessionID string, req Creat
 	if importance <= 0 {
 		importance = 0.9
 	}
+	tags := req.StageTags
+	if tags == nil {
+		tags = []string{}
+	}
+	tagsJSON, _ := json.Marshal(tags)
 	mem := dbmodels.Memory{
 		SessionID:  sessionID,
 		Content:    req.Content,
 		Type:       memType,
 		Importance: importance,
+		StageTags:  tagsJSON,
 	}
 	if err := e.db.Create(&mem).Error; err != nil {
 		return nil, fmt.Errorf("create memory: %w", err)
@@ -729,7 +954,7 @@ func (e *GameEngine) ConsolidateNow(ctx context.Context, sessionID string) error
 	if err := e.db.First(&sess, "id = ?", sessionID).Error; err != nil {
 		return fmt.Errorf("session not found: %w", err)
 	}
-	history, err := e.sessions.GetHistory(sessionID, e.maxHistoryFloors)
+	history, err := e.sessions.GetHistory(sessionID, "main", e.maxHistoryFloors)
 	if err != nil {
 		return err
 	}
@@ -745,7 +970,7 @@ func (e *GameEngine) ConsolidateNow(ctx context.Context, sessionID string) error
 	if err := e.memStore.ParseConsolidationResult(sessionID, resp.Content, sess.FloorCount); err != nil {
 		return err
 	}
-	summary, _ := e.memStore.GetForInjection(sessionID, e.memoryTokenBudget)
+	summary, _ := e.memStore.GetForInjection(sessionID, e.memoryTokenBudget, "")
 	return e.memStore.UpdateSessionSummaryCache(sessionID, summary)
 }
 
@@ -780,9 +1005,13 @@ func (e *GameEngine) PromptPreview(ctx context.Context, sessionID, userInput str
 		Order("injection_order ASC").Find(&presetEntries)
 
 	var tmplCfg struct {
-		MemoryLabel       string   `json:"memory_label"`
-		FallbackOptions   []string `json:"fallback_options"`
-		WorldbookGroupCap int      `json:"worldbook_group_cap"`
+		MemoryLabel          string   `json:"memory_label"`
+		FallbackOptions      []string `json:"fallback_options"`
+		WorldbookGroupCap    int      `json:"worldbook_group_cap"`
+		WorldbookTokenBudget int      `json:"worldbook_token_budget"`
+		CharName    string `json:"char_name"`
+		PlayerName  string `json:"player_name"`
+		PersonaName string `json:"persona_name"`
 	}
 	_ = json.Unmarshal(tmpl.Config, &tmplCfg)
 
@@ -792,7 +1021,7 @@ func (e *GameEngine) PromptPreview(ctx context.Context, sessionID, userInput str
 	sb := variable.NewSandbox(nil, chatVars, nil, nil, nil)
 
 	// 历史 + 当前输入
-	history, _ := e.sessions.GetHistory(sessionID, e.maxHistoryFloors)
+	history, _ := e.sessions.GetHistory(sessionID, "main", e.maxHistoryFloors)
 	var recentMsgs []prompt_ir.Message
 	for _, m := range history {
 		recentMsgs = append(recentMsgs, prompt_ir.Message{Role: m["role"], Content: m["content"]})
@@ -828,14 +1057,24 @@ func (e *GameEngine) PromptPreview(ctx context.Context, sessionID, userInput str
 			SystemPromptTemplate: tmpl.SystemPromptTemplate,
 			WorldbookEntries:     wbIR,
 			PresetEntries:        presetIR,
-			MemorySummary:        sess.MemorySummary,
+			MemorySummary: func() string {
+				stage, _ := chatVars["game_stage"].(string)
+				s, _ := e.memStore.GetForInjection(sessionID, e.memoryTokenBudget, stage)
+				return s
+			}(),
 			MemoryLabel:          tmplCfg.MemoryLabel,
 			FallbackOptions:      tmplCfg.FallbackOptions,
 			WorldbookGroupCap:    tmplCfg.WorldbookGroupCap,
+			WorldbookTokenBudget: tmplCfg.WorldbookTokenBudget,
 		},
 		Variables:      sb.Flatten(),
 		RecentMessages: recentMsgs,
 		TokenBudget:    e.tokenBudget,
+		CharName:    tmplCfg.CharName,
+		UserName:    tmplCfg.PlayerName,
+		PersonaName: tmplCfg.PersonaName,
+		// 角色卡注入（M11）
+		CharacterDescription: e.loadCharacterDescription(sess, tmplCfg.CharName),
 	}
 
 	runner := pipeline.NewRunner()

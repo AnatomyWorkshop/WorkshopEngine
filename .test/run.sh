@@ -14,10 +14,11 @@ if [ -f "$SCRIPT_DIR/.env" ]; then
   set +a
 fi
 
-echo "=== Unit Tests (backend-v2/testutil) ==="
-cd "$ROOT"
-go test ./testutil/... -v -count=1
+echo "=== Unit Tests (.test/) ==="
+cd "$SCRIPT_DIR"
+go test ./... -v -count=1
 
 echo ""
 echo "=== Integration Tests (DeepSeek API) ==="
+cd "$ROOT"
 go test -tags integration ./internal/integration/... -v -timeout 120s -count=1

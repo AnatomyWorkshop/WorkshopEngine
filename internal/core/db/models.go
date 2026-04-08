@@ -13,16 +13,22 @@ import (
 
 // GameSession 一次完整的游玩会话
 type GameSession struct {
-	ID             string         `gorm:"primaryKey;type:uuid;default:gen_random_uuid()" json:"id"`
-	GameID         string         `gorm:"not null;index"                                json:"game_id"`
-	UserID         string         `gorm:"index"                                         json:"user_id"`
-	Title          string         `gorm:"default:''"                                    json:"title"`           // 会话标题（可选）
-	Status         string         `gorm:"default:'active'"                              json:"status"`          // active | archived
-	Variables      datatypes.JSON `gorm:"type:jsonb;default:'{}'"                       json:"variables"`       // Chat 级持久变量
-	MemorySummary  string         `gorm:"type:text"                                     json:"memory_summary"`  // 最新摘要快照（由 Worker 异步写入）
-	FloorCount     int            `gorm:"default:0"                                     json:"floor_count"`     // 已完成回合数，触发摘要的阈值依据
-	CreatedAt      time.Time      `json:"created_at"`
-	UpdatedAt      time.Time      `json:"updated_at"`
+	ID                  string         `gorm:"primaryKey;type:uuid;default:gen_random_uuid()" json:"id"`
+	GameID              string         `gorm:"not null;index"                                json:"game_id"`
+	UserID              string         `gorm:"index"                                         json:"user_id"`
+	Title               string         `gorm:"default:''"                                    json:"title"`               // 会话标题（可选）
+	Status              string         `gorm:"default:'active'"                              json:"status"`              // active | archived
+	Variables           datatypes.JSON `gorm:"type:jsonb;default:'{}'"                       json:"variables"`           // Chat 级持久变量
+	MemorySummary       string         `gorm:"type:text"                                     json:"memory_summary"`      // 最新摘要快照（由 Worker 异步写入）
+	FloorCount          int            `gorm:"default:0"                                     json:"floor_count"`         // 已完成回合数，触发摘要的阈值依据
+	// 角色卡注入管线（M11）
+	CharacterCardID     string         `gorm:"default:''"                                    json:"character_card_id"`   // 关联角色卡 ID（空 = 无角色卡绑定）
+	CharacterSnapshot   datatypes.JSON `gorm:"type:jsonb;default:'null'"                     json:"character_snapshot"`  // pin 策略时的角色卡快照（session 创建时冻结）
+	// 并发生成保护（M13）
+	Generating          bool           `gorm:"default:false"                                 json:"generating"`          // true = 正在生成，防并发
+	GenerationMode      string         `gorm:"default:'reject'"                              json:"generation_mode"`     // reject（默认，直接 409）| queue（排队，P-3K 扩展）
+	CreatedAt           time.Time      `json:"created_at"`
+	UpdatedAt           time.Time      `json:"updated_at"`
 }
 
 // FloorStatus 楼层状态机（提交后不可改 —— 核心设计原则）
@@ -39,9 +45,24 @@ const (
 type Floor struct {
 	ID        string      `gorm:"primaryKey;type:uuid;default:gen_random_uuid()" json:"id"`
 	SessionID string      `gorm:"not null;index"                                json:"session_id"`
-	Seq       int         `gorm:"not null"                                      json:"seq"`    // 楼层时序，决定对话顺序
+	Seq       int         `gorm:"not null"                                      json:"seq"`       // 楼层时序（session 内全局唯一，跨分支共享计数器）
+	BranchID  string      `gorm:"not null;default:'main';index"                 json:"branch_id"` // 所属分支（P-3G）
 	Status    FloorStatus `gorm:"not null;default:'draft'"                      json:"status"`
 	CreatedAt time.Time   `json:"created_at"`
+}
+
+// SessionBranch Session 内时间线分支元数据（P-3G）
+//
+// 每条记录代表从某个楼层序号分叉出的新分支。
+// 历史重建规则：branch "foo" 的完整历史 = 主分支楼层（seq ≤ OriginSeq）+ "foo" 分支所有楼层。
+// "main" 分支是隐式主干，不在此表存储。
+type SessionBranch struct {
+	ID           string    `gorm:"primaryKey;type:uuid;default:gen_random_uuid()" json:"id"`
+	SessionID    string    `gorm:"not null;index"                                 json:"session_id"`
+	BranchID     string    `gorm:"not null"                                       json:"branch_id"`      // 分支标识符（用户可读，如 "branch-abc123"）
+	ParentBranch string    `gorm:"not null;default:'main'"                        json:"parent_branch"`  // 父分支 ID（当前仅支持从 main 分叉）
+	OriginSeq    int       `gorm:"not null"                                       json:"origin_seq"`     // 分叉点楼层序号（含该楼层）
+	CreatedAt    time.Time `json:"created_at"`
 }
 
 // MessagePage 一个楼层内的一次生成尝试（即酒馆的 Swipe）
@@ -70,16 +91,19 @@ const (
 
 // Memory 一条记忆条目
 type Memory struct {
-	ID          string     `gorm:"primaryKey;type:uuid;default:gen_random_uuid()" json:"id"`
-	SessionID   string     `gorm:"not null;index"                                json:"session_id"`
-	FactKey     string     `gorm:"index;default:''"                              json:"fact_key"`    // 结构化事实的稳定键（type=fact 时有效，空=自由文本摘要）
-	Content     string     `gorm:"type:text;not null"                            json:"content"`
-	Type        MemoryType `gorm:"not null;default:'summary'"                    json:"type"`
-	Importance  float64    `gorm:"default:1.0"                                   json:"importance"`  // 衰减排序权重
-	SourceFloor int        `json:"source_floor"`                                                  // 来自第几楼层（可溯源）
-	Deprecated  bool       `gorm:"default:false"                                 json:"deprecated"` // 过时标记
-	CreatedAt   time.Time  `json:"created_at"`
-	UpdatedAt   time.Time  `json:"updated_at"`
+	ID          string         `gorm:"primaryKey;type:uuid;default:gen_random_uuid()" json:"id"`
+	SessionID   string         `gorm:"not null;index"                                json:"session_id"`
+	FactKey     string         `gorm:"index;default:''"                              json:"fact_key"`    // 结构化事实的稳定键（type=fact 时有效，空=自由文本摘要）
+	Content     string         `gorm:"type:text;not null"                            json:"content"`
+	Type        MemoryType     `gorm:"not null;default:'summary'"                    json:"type"`
+	Importance  float64        `gorm:"default:1.0"                                   json:"importance"`  // 衰减排序权重
+	SourceFloor int            `json:"source_floor"`                                                  // 来自第几楼层（可溯源）
+	Deprecated  bool           `gorm:"default:false"                                 json:"deprecated"` // 过时标记
+	// StageTags 阶段标签（空数组 = 无阶段限制，始终注入；非空 = 仅在 game_stage 变量匹配时注入）。
+	// 用于多幕叙事：第一幕的调查线索不应在第三幕结局时占用 token。
+	StageTags   datatypes.JSON `gorm:"type:jsonb;default:'[]'"                       json:"stage_tags"`
+	CreatedAt   time.Time      `json:"created_at"`
+	UpdatedAt   time.Time      `json:"updated_at"`
 }
 
 // MemoryRelation 记忆边的关系类型
@@ -159,6 +183,7 @@ type WorldbookEntry struct {
 	Priority       int            `gorm:"default:0"                                     json:"priority"`      // 优先级偏移
 	ScanDepth      int            `gorm:"default:0"                                     json:"scan_depth"`    // 扫描最近 N 条消息（0 = 全部）
 	Position       string         `gorm:"default:'before_template'"                     json:"position"`      // before_template | after_template | at_depth
+	Depth          int            `gorm:"default:0"                                     json:"depth"`         // at_depth 时距底部的距离（0=最底，1=倒数第一，依此类推）
 	WholeWord      bool           `gorm:"default:false"                                 json:"whole_word"`    // 全词匹配
 	Enabled        bool           `gorm:"default:true"                                  json:"enabled"`
 	Group          string         `gorm:"default:''"                                    json:"group"`         // 互斥分组名（空 = 不参与分组裁剪）

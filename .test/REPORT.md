@@ -1,22 +1,31 @@
 # Test Report — backend-v2 Engine
 
-更新时间：2026-04-06（Phase 3-A~D 完成后）
+更新时间：2026-04-08（Phase 3 全部完成 M11–M14）
 
 ## 目录结构
 
 ```
 backend-v2/
-├── testutil/
-│   └── unit_test.go    # 黑盒单元测试（package mvu_test，与被测包解耦）
 ├── .test/
-│   ├── .env            # LLM 配置（不提交 git）
-│   ├── go.mod          # 独立模块（仅用于 preset_tool_echo 辅助工具）
-│   ├── run.sh          # 一键运行全部测试
-│   ├── REPORT.md       # 本报告
-│   ├── data/           # 测试数据
-│   └── preset_tool_echo/  # Preset Tool HTTP 回调测试服务器
+│   ├── .env                    # LLM 配置（不提交 git）
+│   ├── go.mod                  # 独立模块（replace mvu-backend => ../）
+│   ├── run.sh                  # 一键运行全部测试
+│   ├── REPORT.md               # 本报告
+│   ├── unit_test.go            # 黑盒单元测试（package mvu_test，无网络依赖）
+│   ├── data/                   # 测试数据
+│   └── preset_tool_echo/       # Preset Tool HTTP 回调测试服务器
 internal/integration/
-└── llm_test.go     # 集成测试（需 -tags integration）
+└── llm_test.go                 # 集成测试（需 -tags integration，需 LLM API Key）
+```
+
+## 运行方式
+
+```bash
+# 单元测试（无需 API Key）
+cd .test && go test ./... -v -count=1
+
+# 全量测试（需 .test/.env 配置 API Key）
+bash .test/run.sh
 ```
 
 ## 如何运行

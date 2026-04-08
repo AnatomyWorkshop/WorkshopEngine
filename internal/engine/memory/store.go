@@ -94,9 +94,8 @@ func (s *Store) SaveFact(sessionID, content string, importance float64) error {
 //   - 若无已有记录：直接新建一行。
 //     返回 (newID, "", nil)。
 //
-// 与旧版的差异：旧版做 in-place UPDATE（同一行 ID），新版先废弃旧行再新建，
-// 保留历史行供 edge 溯源和 Lint 审计。
-func (s *Store) UpsertFact(sessionID, factKey, content string, importance float64, sourceFloor int) (newID, oldID string, err error) {
+// stageTags 为阶段标签列表（空 slice = 无阶段限制）。
+func (s *Store) UpsertFact(sessionID, factKey, content string, importance float64, sourceFloor int, stageTags []string) (newID, oldID string, err error) {
 	var existing dbmodels.Memory
 	findErr := s.db.Where("session_id = ? AND fact_key = ? AND deprecated = false", sessionID, factKey).
 		First(&existing).Error
@@ -107,6 +106,11 @@ func (s *Store) UpsertFact(sessionID, factKey, content string, importance float6
 			return "", "", err
 		}
 	}
+	// 编码 stage_tags
+	if stageTags == nil {
+		stageTags = []string{}
+	}
+	tagsJSON, _ := json.Marshal(stageTags)
 	// 新建行
 	newMem := &dbmodels.Memory{
 		SessionID:   sessionID,
@@ -115,6 +119,7 @@ func (s *Store) UpsertFact(sessionID, factKey, content string, importance float6
 		Type:        dbmodels.MemoryFact,
 		Importance:  importance,
 		SourceFloor: sourceFloor,
+		StageTags:   tagsJSON,
 	}
 	if err = s.db.Create(newMem).Error; err != nil {
 		return "", "", err
@@ -147,9 +152,13 @@ func (s *Store) DeprecateFactsByKey(sessionID string, keys []string) ([]dbmodels
 	return mems, nil
 }
 
-// GetForInjection 按重要度衰减排序，在 Token 预算内取最相关的记忆拼成注入文本
+// GetForInjection 按重要度衰减排序，在 Token 预算内取最相关的记忆拼成注入文本。
+// currentStage 对应 ctx.Variables["game_stage"]：
+//   - 空字符串 → 不过滤（注入所有未废弃记忆，向后兼容）
+//   - 非空字符串 → 只注入 stage_tags 为空（无阶段限制）或包含 currentStage 的条目
+//
 // 复刻 TH 的衰减排序逻辑（按时间半衰期降权）
-func (s *Store) GetForInjection(sessionID string, tokenBudget int) (string, error) {
+func (s *Store) GetForInjection(sessionID string, tokenBudget int, currentStage string) (string, error) {
 	var mems []dbmodels.Memory
 	err := s.db.Where("session_id = ? AND deprecated = false", sessionID).
 		Order("importance DESC, created_at DESC").
@@ -160,6 +169,20 @@ func (s *Store) GetForInjection(sessionID string, tokenBudget int) (string, erro
 	}
 	if len(mems) == 0 {
 		return "", nil
+	}
+
+	// 阶段过滤：stage_tags 为空（无限制）或包含 currentStage 的条目才注入
+	if currentStage != "" {
+		filtered := mems[:0:0]
+		for _, m := range mems {
+			if stageMatches(m.StageTags, currentStage) {
+				filtered = append(filtered, m)
+			}
+		}
+		mems = filtered
+		if len(mems) == 0 {
+			return "", nil
+		}
 	}
 
 	// 计算衰减分数（指数半衰期）
@@ -198,6 +221,33 @@ func (s *Store) GetForInjection(sessionID string, tokenBudget int) (string, erro
 		return "", nil
 	}
 	return strings.Join(parts, "\n"), nil
+}
+
+// stageToTags 将单个 stage 字符串转为 stage_tags 切片（空字符串 → 空切片 = 无阶段限制）。
+func stageToTags(stage string) []string {
+	if stage == "" {
+		return []string{}
+	}
+	return []string{stage}
+}
+
+// stageMatches 判断记忆条目的 stage_tags 是否允许在 currentStage 下注入。
+// stage_tags 为空数组 → 无阶段限制，始终返回 true。
+// stage_tags 非空 → 仅当 currentStage 包含在标签列表中时返回 true。
+func stageMatches(stageTagsJSON []byte, currentStage string) bool {
+	if len(stageTagsJSON) == 0 {
+		return true
+	}
+	var tags []string
+	if err := json.Unmarshal(stageTagsJSON, &tags); err != nil || len(tags) == 0 {
+		return true // 解析失败或空数组 → 无限制
+	}
+	for _, t := range tags {
+		if t == currentStage {
+			return true
+		}
+	}
+	return false
 }
 
 // formatMemoryLine 将记忆条目格式化为注入文本的一行。
@@ -281,15 +331,16 @@ func (s *Store) BuildConsolidationPrompt(sessionID string, recentDialogue []map[
 
 // consolidationJSON 是 LLM 结构化整合输出的反序列化目标。
 type consolidationJSON struct {
-	TurnSummary    string        `json:"turn_summary"`
-	FactsAdd       []factEntry   `json:"facts_add"`
-	FactsUpdate    []factEntry   `json:"facts_update"`
-	FactsDeprecate []string      `json:"facts_deprecate"`
+	TurnSummary    string      `json:"turn_summary"`
+	FactsAdd       []factEntry `json:"facts_add"`
+	FactsUpdate    []factEntry `json:"facts_update"`
+	FactsDeprecate []string    `json:"facts_deprecate"`
 }
 
 type factEntry struct {
 	Key     string `json:"key"`
 	Content string `json:"content"`
+	Stage   string `json:"stage,omitempty"` // 可选阶段标签（如 "act_1"），写入 stage_tags
 }
 
 // ParseConsolidationResult 解析整合结果并写入库。
@@ -326,7 +377,8 @@ func (s *Store) applyStructuredResult(sessionID string, sourceFloor int, out con
 		if f.Key == "" || f.Content == "" {
 			continue
 		}
-		if _, _, err := s.UpsertFact(sessionID, f.Key, f.Content, 0.9, sourceFloor); err != nil {
+		tags := stageToTags(f.Stage)
+		if _, _, err := s.UpsertFact(sessionID, f.Key, f.Content, 0.9, sourceFloor, tags); err != nil {
 			errs = append(errs, "add "+f.Key+": "+err.Error())
 		}
 	}
@@ -336,7 +388,8 @@ func (s *Store) applyStructuredResult(sessionID string, sourceFloor int, out con
 		if f.Key == "" || f.Content == "" {
 			continue
 		}
-		newID, oldID, err := s.UpsertFact(sessionID, f.Key, f.Content, 0.9, sourceFloor)
+		tags := stageToTags(f.Stage)
+		newID, oldID, err := s.UpsertFact(sessionID, f.Key, f.Content, 0.9, sourceFloor, tags)
 		if err != nil {
 			errs = append(errs, "update "+f.Key+": "+err.Error())
 			continue
@@ -427,17 +480,38 @@ func (s *Store) ListMemories(sessionID string) ([]dbmodels.Memory, error) {
 	return mems, err
 }
 
-// UpdateMemory 部分更新记忆字段（content / importance / type）
+// UpdateMemory 部分更新记忆字段（content / importance / type / deprecated / stage_tags）
 func (s *Store) UpdateMemory(memID, sessionID string, updates map[string]any) (*dbmodels.Memory, error) {
 	// 只允许更新安全字段
 	allowed := map[string]struct{}{
-		"content": {}, "importance": {}, "type": {}, "deprecated": {},
+		"content": {}, "importance": {}, "type": {}, "deprecated": {}, "stage_tags": {},
 	}
 	safe := make(map[string]any, len(updates))
 	for k, v := range updates {
-		if _, ok := allowed[k]; ok {
-			safe[k] = v
+		if _, ok := allowed[k]; !ok {
+			continue
 		}
+		// stage_tags 可能从 JSON 解析为 []interface{}，需转换为 []string 再序列化
+		if k == "stage_tags" {
+			var tags []string
+			switch t := v.(type) {
+			case []string:
+				tags = t
+			case []any:
+				for _, item := range t {
+					if s, ok := item.(string); ok {
+						tags = append(tags, s)
+					}
+				}
+			}
+			if tags == nil {
+				tags = []string{}
+			}
+			b, _ := json.Marshal(tags)
+			safe[k] = b
+			continue
+		}
+		safe[k] = v
 	}
 	if len(safe) == 0 {
 		var mem dbmodels.Memory

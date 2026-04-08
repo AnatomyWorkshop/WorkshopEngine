@@ -43,6 +43,9 @@ type TurnRequest struct {
 	UserInput string `json:"user_input"`
 	IsRegen   bool   `json:"is_regen"` // 重新生成（Swipe）
 
+	// 可选：分支 ID（空 = "main"，P-3G）
+	BranchID string `json:"branch_id,omitempty"`
+
 	// 可选：用户自定义 AI 配置（覆盖服务器默认 Key）
 	APIKey  string `json:"api_key,omitempty"`
 	BaseURL string `json:"base_url,omitempty"`
@@ -73,7 +76,7 @@ type TurnResponse struct {
 // GameEngine 完整游戏引擎（依赖注入）
 type GameEngine struct {
 	db         *gorm.DB
-	llmClient  *llm.Client      // env 配置的默认客户端（兜底）
+	llmClient  *llm.Client        // env 配置的默认客户端（兜底）
 	registry   *provider.Registry // 动态 Provider 注册表（可 nil，退化为 llmClient）
 	sessions   *session.Manager
 	memStore   *memory.Store
@@ -85,10 +88,13 @@ type GameEngine struct {
 	maxHistoryFloors    int
 	memoryMaxTokens     int
 	memoryTokenBudget   int
+	llmTimeoutSec       int // LLM_TIMEOUT_SEC
+	llmMaxRetries       int // LLM_MAX_RETRIES
+	maxToolIter         int // LLM_MAX_TOOL_ITER
 }
 
 // NewGameEngine 构造游戏引擎（所有依赖从外部注入，方便单测）
-func NewGameEngine(db *gorm.DB, llmClient *llm.Client, reg *provider.Registry, memoryTriggerRounds, maxTokens, tokenBudget, maxHistoryFloors, memoryMaxTokens, memoryTokenBudget int) *GameEngine {
+func NewGameEngine(db *gorm.DB, llmClient *llm.Client, reg *provider.Registry, memoryTriggerRounds, maxTokens, tokenBudget, maxHistoryFloors, memoryMaxTokens, memoryTokenBudget, llmTimeoutSec, llmMaxRetries, maxToolIter int) *GameEngine {
 	if maxTokens <= 0 {
 		maxTokens = 2048
 	}
@@ -104,6 +110,15 @@ func NewGameEngine(db *gorm.DB, llmClient *llm.Client, reg *provider.Registry, m
 	if memoryTokenBudget <= 0 {
 		memoryTokenBudget = 600
 	}
+	if llmTimeoutSec <= 0 {
+		llmTimeoutSec = 60
+	}
+	if llmMaxRetries < 0 {
+		llmMaxRetries = 2
+	}
+	if maxToolIter <= 0 {
+		maxToolIter = 5
+	}
 	return &GameEngine{
 		db:                  db,
 		llmClient:           llmClient,
@@ -116,6 +131,9 @@ func NewGameEngine(db *gorm.DB, llmClient *llm.Client, reg *provider.Registry, m
 		maxHistoryFloors:    maxHistoryFloors,
 		memoryMaxTokens:     memoryMaxTokens,
 		memoryTokenBudget:   memoryTokenBudget,
+		llmTimeoutSec:       llmTimeoutSec,
+		llmMaxRetries:       llmMaxRetries,
+		maxToolIter:         maxToolIter,
 	}
 }
 
@@ -143,7 +161,7 @@ func (e *GameEngine) PlayTurn(ctx context.Context, req TurnRequest) (*TurnRespon
 
 	// 读取 Regex 规则（按 profile + order 排序）
 	var dbRegexRules []dbmodels.RegexRule
-	e.db.Joins("JOIN regex_profiles ON regex_rules.profile_id = regex_profiles.id").
+	e.db.Joins("JOIN regex_profiles ON regex_rules.profile_id = regex_profiles.id::text").
 		Where("regex_profiles.game_id = ? AND regex_profiles.enabled = true AND regex_rules.enabled = true", sess.GameID).
 		Order("regex_rules.order ASC").
 		Find(&dbRegexRules)
@@ -157,6 +175,11 @@ func (e *GameEngine) PlayTurn(ctx context.Context, req TurnRequest) (*TurnRespon
 		DirectorPrompt    string                  `json:"director_prompt"`  // 可选，Director 槽的分析指令
 		VerifierPrompt    string                  `json:"verifier_prompt"`  // 可选，Verifier 槽校验指令（覆盖默认）
 		WorldbookGroupCap int                     `json:"worldbook_group_cap"` // 同组词条最多保留数（默认 1）
+		WorldbookTokenBudget int                  `json:"worldbook_token_budget"` // 世界书 token 总预算（0=不限制）
+		// ST 宏展开相关字段：对应 {{char}} / {{user}} / {{persona}}
+		CharName    string `json:"char_name"`    // {{char}} → 角色名（默认空，由模板标题或角色卡 fallback）
+		PlayerName  string `json:"player_name"`  // {{user}} → 玩家名（默认"你"）
+		PersonaName string `json:"persona_name"` // {{persona}} → 人设显示名（空时回退至 CharName）
 	}
 	_ = json.Unmarshal(template.Config, &tmplCfg)
 
@@ -165,6 +188,13 @@ func (e *GameEngine) PlayTurn(ctx context.Context, req TurnRequest) (*TurnRespon
 	var err error
 
 	if req.IsRegen {
+		// 并发保护：regen 同样检查 generating 标志
+		if sess.Generating {
+			mode := sess.GenerationMode
+			if mode == "" || mode == "reject" {
+				return nil, session.ErrConcurrentGeneration
+			}
+		}
 		var floor dbmodels.Floor
 		e.db.Where("session_id = ? AND status IN ?", req.SessionID,
 			[]string{string(dbmodels.FloorGenerating), string(dbmodels.FloorFailed)}).
@@ -174,8 +204,12 @@ func (e *GameEngine) PlayTurn(ctx context.Context, req TurnRequest) (*TurnRespon
 		}
 		floorID = floor.ID
 		pageID, err = e.sessions.RegenTurn(floorID, req.UserInput)
+		if err == nil {
+			// 标记为生成中（regen 路径不走 StartTurn 事务，手动设置）
+			e.db.Model(&dbmodels.GameSession{}).Where("id = ?", req.SessionID).Update("generating", true)
+		}
 	} else {
-		floorID, pageID, err = e.sessions.StartTurn(req.SessionID, req.UserInput)
+		floorID, pageID, err = e.sessions.StartTurn(req.SessionID, req.UserInput, req.BranchID)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("session turn: %w", err)
@@ -229,11 +263,13 @@ func (e *GameEngine) PlayTurn(ctx context.Context, req TurnRequest) (*TurnRespon
 		}
 	}
 
-	// ── 4. 准备记忆摘要（来自异步 Worker 的缓存） ──────────────
-	memorySummary := sess.MemorySummary
+	// ── 4. 准备记忆摘要（按当前阶段过滤注入）──────────────────────
+	// currentStage 来自 game_stage 变量（空 = 不过滤，向后兼容）
+	currentStage, _ := chatVars["game_stage"].(string)
+	memorySummary, _ := e.memStore.GetForInjection(req.SessionID, e.memoryTokenBudget, currentStage)
 
 	// ── 5. 加载历史消息 ────────────────────────────────────────
-	history, _ := e.sessions.GetHistory(req.SessionID, e.maxHistoryFloors)
+	history, _ := e.sessions.GetHistory(req.SessionID, req.BranchID, e.maxHistoryFloors)
 
 	// ── 6. 将世界书条目转换为 Pipeline 所需格式 ────────────────
 	var wbIR []prompt_ir.WorldbookEntry
@@ -252,8 +288,11 @@ func (e *GameEngine) PlayTurn(ctx context.Context, req TurnRequest) (*TurnRespon
 			Priority:       entry.Priority,
 			ScanDepth:      entry.ScanDepth,
 			Position:       entry.Position,
+			Depth:          entry.Depth,
 			WholeWord:      entry.WholeWord,
 			Enabled:        entry.Enabled,
+			Group:          entry.Group,
+			GroupWeight:    entry.GroupWeight,
 		})
 	}
 
@@ -308,16 +347,24 @@ func (e *GameEngine) PlayTurn(ctx context.Context, req TurnRequest) (*TurnRespon
 			FallbackOptions:      tmplCfg.FallbackOptions,
 			RegexRules:           regexRules,
 			WorldbookGroupCap:    tmplCfg.WorldbookGroupCap,
+		WorldbookTokenBudget: tmplCfg.WorldbookTokenBudget,
 		},
 		Variables:      sb.Flatten(),
 		RecentMessages: recentMsgs,
 		TokenBudget:    e.tokenBudget,
+		// ST 宏展开字段：{{char}} / {{user}} / {{persona}}
+		CharName:    tmplCfg.CharName,
+		UserName:    tmplCfg.PlayerName,
+		PersonaName: tmplCfg.PersonaName,
+		// 角色卡注入（M11）：pin 策略用快照，latest 策略加载最新卡片
+		CharacterDescription: e.loadCharacterDescription(sess, tmplCfg.CharName),
 	}
 
 	runner := pipeline.NewRunner()
 	finalMessages, err := runner.Execute(pipelineCtx)
 	if err != nil {
 		_ = e.sessions.FailTurn(floorID, err.Error())
+		e.sessions.ClearGenerating(req.SessionID)
 		return nil, fmt.Errorf("pipeline: %w", err)
 	}
 
@@ -367,7 +414,7 @@ func (e *GameEngine) PlayTurn(ctx context.Context, req TurnRequest) (*TurnRespon
 		if baseURL == "" {
 			baseURL = e.llmClient.BaseURL()
 		}
-		client = llm.NewClient(baseURL, req.APIKey, llmOpts.Model, 60, 2)
+		client = llm.NewClient(baseURL, req.APIKey, llmOpts.Model, e.llmTimeoutSec, e.llmMaxRetries)
 	}
 
 	// 注入工具定义
@@ -375,13 +422,13 @@ func (e *GameEngine) PlayTurn(ctx context.Context, req TurnRequest) (*TurnRespon
 		llmOpts.Tools = defs
 	}
 
-	// ── 10. Agentic Tool Loop（最多 5 轮，无工具时单次直通）─────
-	const maxToolIter = 5
+	// ── 10. Agentic Tool Loop（无工具时单次直通）──────────────────
 	var llmResp *llm.Response
-	for iter := 0; iter < maxToolIter; iter++ {
+	for iter := 0; iter < e.maxToolIter; iter++ {
 		llmResp, err = client.Chat(ctx, llmMsgs, llmOpts)
 		if err != nil {
 			_ = e.sessions.FailTurn(floorID, err.Error())
+			e.sessions.ClearGenerating(req.SessionID)
 			return nil, fmt.Errorf("llm: %w", err)
 		}
 		if len(llmResp.ToolCalls) == 0 {
@@ -431,8 +478,12 @@ func (e *GameEngine) PlayTurn(ctx context.Context, req TurnRequest) (*TurnRespon
 
 	// ── 13. 提交楼层（锁定 + Page 变量提升至 Chat） ────────────
 	if err := e.sessions.CommitTurn(pageID, llmResp.Content, sb.Flatten()); err != nil {
+		e.sessions.ClearGenerating(req.SessionID)
 		return nil, fmt.Errorf("commit turn: %w", err)
 	}
+
+	// ── 13b. 清除并发锁 ──────────────────────────────────────
+	e.sessions.ClearGenerating(req.SessionID)
 
 	// ── 14. 同步递增楼层计数（ScheduledTurn 冷却检查依赖最新值）──────
 	count, _ := e.sessions.IncrFloorCount(req.SessionID)
@@ -541,6 +592,6 @@ func (e *GameEngine) triggerMemoryConsolidation(sessionID string, recentHistory 
 	}
 	_ = e.memStore.ParseConsolidationResult(sessionID, resp.Content, floorCount)
 
-	summary, _ := e.memStore.GetForInjection(sessionID, e.memoryTokenBudget)
+	summary, _ := e.memStore.GetForInjection(sessionID, e.memoryTokenBudget, "")
 	_ = e.memStore.UpdateSessionSummaryCache(sessionID, summary)
 }

@@ -1,8 +1,9 @@
 package pipeline
 
 import (
-	"strings"
+	"time"
 
+	"mvu-backend/internal/engine/macros"
 	"mvu-backend/internal/engine/prompt_ir"
 )
 
@@ -36,12 +37,20 @@ func (n *PresetNode) Process(ctx *prompt_ir.ContextData) error {
 		return nil
 	}
 
+	macroCtx := macros.MacroContext{
+		CharName:    ctx.CharName,
+		UserName:    ctx.UserName,
+		PersonaName: ctx.PersonaName,
+		Variables:   ctx.Variables,
+		Now:         time.Now(),
+	}
+
 	for _, entry := range ctx.Config.PresetEntries {
 		if !entry.Enabled {
 			continue
 		}
 
-		content := presetResolveMacros(entry.Content, ctx.Variables)
+		content := macros.Expand(entry.Content, macroCtx)
 		if content == "" {
 			continue
 		}
@@ -62,15 +71,3 @@ func (n *PresetNode) Process(ctx *prompt_ir.ContextData) error {
 	return nil
 }
 
-// presetResolveMacros 替换条目内容中的 {{variable}} 占位符。
-// 与 WorldbookNode 的 resolveMacros 功能相同；两处保持独立以避免跨包耦合，
-// 待将来提取为公共 macro 包时一并合并。
-func presetResolveMacros(text string, vars map[string]any) string {
-	res := text
-	for k, v := range vars {
-		if strVal, ok := v.(string); ok {
-			res = strings.ReplaceAll(res, "{{"+k+"}}", strVal)
-		}
-	}
-	return res
-}

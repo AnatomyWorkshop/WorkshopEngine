@@ -134,6 +134,8 @@ func registerImportExportRoutes(rg *gin.RouterGroup, db *gorm.DB) {
 				Constant      bool     `json:"constant"`
 				Disable       bool     `json:"disable"`
 				Order         int      `json:"order"`
+				Position      int      `json:"position"`    // ST: 0=before_char, 1=after_char, 2=before_input, 3=after_input, 4=at_depth
+				Depth         int      `json:"depth"`       // ST at_depth 值（position=4 时有效）
 				Comment       string   `json:"comment"`
 				Group         string   `json:"group"`
 				GroupWeight   float64  `json:"groupWeight"` // ST 使用 camelCase
@@ -148,6 +150,26 @@ func registerImportExportRoutes(rg *gin.RouterGroup, db *gorm.DB) {
 		for _, e := range raw.Entries {
 			keys, _ := json.Marshal(e.Key)
 			secKeys, _ := json.Marshal(e.SecondaryKeys)
+
+			// ST position 数字映射到 WE position 字符串
+			// 0=before_char（before_template）, 1=after_char（after_template）,
+			// 2=before_input（before_template）, 3=after_input（at_depth=0）,
+			// 4=at_depth
+			position := "before_template"
+			depth := 0
+			switch e.Position {
+			case 1:
+				position = "after_template"
+			case 2:
+				position = "before_template"
+			case 3:
+				position = "at_depth"
+				depth = 0
+			case 4:
+				position = "at_depth"
+				depth = e.Depth
+			}
+
 			entries = append(entries, dbmodels.WorldbookEntry{
 				GameID:        gameID,
 				Keys:          datatypes.JSON(keys),
@@ -156,6 +178,8 @@ func registerImportExportRoutes(rg *gin.RouterGroup, db *gorm.DB) {
 				Constant:      e.Constant,
 				Priority:      e.Order,
 				Enabled:       !e.Disable,
+				Position:      position,
+				Depth:         depth,
 				Comment:       e.Comment,
 				Group:         e.Group,
 				GroupWeight:   e.GroupWeight,
@@ -223,18 +247,34 @@ func registerImportExportRoutes(rg *gin.RouterGroup, db *gorm.DB) {
 	// 解包导入游戏（重建所有关联数据，新建 game_id 避免冲突）
 	rg.POST("/templates/import", func(c *gin.Context) {
 		var pkg struct {
-			Version         string                    `json:"version"`
-			Template        dbmodels.GameTemplate     `json:"template"`
-			PresetEntries   []dbmodels.PresetEntry    `json:"preset_entries"`
-			WorldbookEntries []dbmodels.WorldbookEntry `json:"worldbook_entries"`
-			RegexProfiles   []dbmodels.RegexProfile   `json:"regex_profiles"`
-			RegexRules      []dbmodels.RegexRule      `json:"regex_rules"`
-			Materials       []dbmodels.Material       `json:"materials"`
-			PresetTools     []dbmodels.PresetTool     `json:"preset_tools"`
+			Version          string                     `json:"version"`
+			Template         dbmodels.GameTemplate      `json:"template"`
+			PresetEntries    []dbmodels.PresetEntry     `json:"preset_entries"`
+			WorldbookEntries []dbmodels.WorldbookEntry  `json:"worldbook_entries"`
+			RegexProfiles    []dbmodels.RegexProfile    `json:"regex_profiles"`
+			RegexRules       []dbmodels.RegexRule       `json:"regex_rules"`
+			Materials        []dbmodels.Material        `json:"materials"`
+			PresetTools      []dbmodels.PresetTool      `json:"preset_tools"`
+			Meta             map[string]any             `json:"_meta"`
 		}
 		if err := c.ShouldBindJSON(&pkg); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
+		}
+
+		// 从 _meta 提取 first_mes 并合并进 Template.Config
+		if firstMes, ok := pkg.Meta["first_mes"].(string); ok && firstMes != "" {
+			var cfg map[string]any
+			if len(pkg.Template.Config) > 0 {
+				json.Unmarshal(pkg.Template.Config, &cfg)
+			}
+			if cfg == nil {
+				cfg = map[string]any{}
+			}
+			cfg["first_mes"] = firstMes
+			if b, err := json.Marshal(cfg); err == nil {
+				pkg.Template.Config = b
+			}
 		}
 
 		err := db.Transaction(func(tx *gorm.DB) error {

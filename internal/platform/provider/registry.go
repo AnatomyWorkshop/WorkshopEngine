@@ -152,7 +152,7 @@ func (r *Registry) ResolveForSlot(
 			p.params      AS profile_params
 		FROM llm_profile_bindings b
 		JOIN llm_profiles p
-		  ON p.id = b.profile_id
+		  ON p.id::text = b.profile_id
 		 AND p.status = 'active'
 		WHERE b.account_id = ?
 		  AND p.status    = 'active'
@@ -257,10 +257,12 @@ func applyGenParams(opts *llm.Options, p *genParams) {
 	}
 }
 
-// extractClientTimeouts 从 Client 读取超时和重试设置（通过创建一个零值 Options 探测）。
-// 由于 Client 字段是私有的，这里用保守的静态值替代；若将来 Client 暴露 getter 则直接调用。
-func extractClientTimeouts(_ *llm.Client) (timeoutSec, maxRetries int) {
-	return 60, 2
+// extractClientTimeouts 从 Client 读取超时和重试设置。
+func extractClientTimeouts(c *llm.Client) (timeoutSec, maxRetries int) {
+	if c == nil {
+		return 60, 2
+	}
+	return c.TimeoutSec(), c.MaxRetries()
 }
 
 // NewProviderFromProfile 根据 LLMProfile DB 记录动态创建 Provider（供未来扩展使用）。

@@ -92,12 +92,13 @@ type Response struct {
 
 // Client OpenAI 兼容 LLM 客户端
 type Client struct {
-	baseURL     string
-	apiKey      string
-	model       string
-	httpClient  *http.Client
-	maxRetries  int
-	defaultOpts Options // 来自配置，作为 per-request 参数的兜底
+	baseURL          string
+	apiKey           string
+	model            string
+	httpClient       *http.Client // 非流式调用（带超时）
+	streamHTTPClient *http.Client // 流式调用（无超时，依赖 ctx 取消）
+	maxRetries       int
+	defaultOpts      Options // 来自配置，作为 per-request 参数的兜底
 }
 
 // NewClient 创建客户端
@@ -107,12 +108,25 @@ func NewClient(baseURL, apiKey, model string, timeoutSec, maxRetries int) *Clien
 		apiKey:     apiKey,
 		model:      model,
 		maxRetries: maxRetries,
-		httpClient: &http.Client{Timeout: time.Duration(timeoutSec) * time.Second},
+		// 非流式调用使用 timeoutSec 超时；流式调用使用无超时客户端依赖 request context 取消
+		httpClient:       &http.Client{Timeout: time.Duration(timeoutSec) * time.Second},
+		streamHTTPClient: &http.Client{Timeout: 0}, // 流式：依赖 ctx 取消，不设全局超时
 	}
 }
 
 // BaseURL 返回客户端的 API 地址（供需要临时覆盖 key/url 的调用方读取）
 func (c *Client) BaseURL() string { return c.baseURL }
+
+// TimeoutSec 返回非流式调用超时秒数（供 registry 克隆时复用）
+func (c *Client) TimeoutSec() int {
+	if c.httpClient == nil {
+		return 60
+	}
+	return int(c.httpClient.Timeout.Seconds())
+}
+
+// MaxRetries 返回最大重试次数
+func (c *Client) MaxRetries() int { return c.maxRetries }
 
 // WithDefaults 返回一个携带默认采样参数的新客户端（来自配置层，不影响原客户端）
 func (c *Client) WithDefaults(defaults Options) *Client {
@@ -229,7 +243,7 @@ func (c *Client) ChatStream(ctx context.Context, messages []Message, opts Option
 		req.Header.Set("Authorization", "Bearer "+c.apiKey)
 		req.Header.Set("Accept", "text/event-stream")
 
-		resp, err := c.httpClient.Do(req)
+		resp, err := c.streamHTTPClient.Do(req)
 		if err != nil {
 			errCh <- fmt.Errorf("http stream: %w", err)
 			return

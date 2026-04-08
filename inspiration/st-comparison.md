@@ -1,9 +1,12 @@
 # WorkshopEngine vs TavernHeadless 全景对比
 
-> 更新于 2026-04-06（第三版 — 对齐最新实现状态）
+> 更新于 2026-04-08（第五版 — TH Beta3 封板分析 + Integration Kit + 聚合根 + Runtime Substrate）
 >
-> 参考源：TavernHeadless monorepo（core / adapters-sillytavern / architecture.md）
+> 参考源：TavernHeadless monorepo（core / adapters-sillytavern / architecture.md），本地 clone 最新 commit `bdafb0a`（2026-04-07，v0.2.0-beta.3）
 > WE 当前代码库状态：backend-v2
+>
+> 详细渲染架构与宏指令分析见：`inspiration/2026-04-08-th-rendering-and-macro-analysis.md`
+> TH Beta3 架构分析（Integration Kit / 聚合根 / Runtime Substrate）见：`inspiration/2026-04-08-th-beta3-architecture.md`
 
 ---
 
@@ -227,12 +230,42 @@ WE 当前实现了所有 8 个阶段（Verifier 和 PromptSnapshot 刚于 2026-0
 
 ---
 
-## 六、一句话定位
+## 六、TH 近期重要更新（2026-03 ~ 2026-04，第五版补充）
+
+### TH Beta3 封板（`bdafb0a`，2026-04-07，v0.2.0-beta.3）
+
+14/14 Beta3 Ready 标准全部达成，主要新增能力：
+
+| 特性 | 说明 | WE 参考 |
+|------|------|---------|
+| **`floor_run_state` 精细状态机** | `running/completed/failed/cancelled/superseded`，支持 retry/cancel | WE 4-H SSE Phase 事件是轻量替代 |
+| **Branch-scoped variables** | 分支级变量作用域，不同 branch_id 的 Floor 拥有独立变量沙箱 | WE 3-G 落地后再评估 |
+| **Secret 存储加密** | `secret_config_encrypted` 字段，API Key AES-256-GCM 加密 | WE 4-A |
+| **Deferred MCP tool runtime** | MCP 工具需用户授权后延迟执行（对话框 confirm → 入 job queue） | WE 暂不需要（Preset Tool 已够用）|
+| **Runtime Job 系统** | `runtime_job` 表持久化，lease/retry/dead_letter；进程重启不丢任务 | WE 4-G |
+| **对话导入/导出** | ST JSONL + `.thchat` 原生格式，完整四层树（session/floor/page/message）| WE 4-E |
+| **ResourceToolProvider 23 个工具** | AI 可直接 CRUD 角色卡/世界书/预设/正则 | WE 已有 14 个，可按需扩展 |
+| **MCP 客户端集成** | stdio + Streamable HTTP 双传输，`McpConnectionManager` | WE 3-H 候选 |
+| **Character Card V3 export with characterBook** | 角色卡导出含内嵌世界书；`alternateGreetings` 作为 floor 0 的 swipe pages；`systemPrompt`/`postHistoryInstructions` 自动注入 Preset | WE 3-I 设计参考 |
+| **Worldbook outlet position 修复** | `position=at_depth` 现在按 `scan_depth` 正确计算 outlet 位置 | WE 3-J 实现参考 |
+| **Dry-run worldbook match trace** | `debugOptions.includeWorldbookMatches` 暴露触发词条调试信息 | WE `prompt-preview` 可扩展 |
+| **Soft-supersede for regenerated floors** | 重新生成时旧 Floor 置 `superseded`（软删除），保留时间线完整性 | WE 中期可参考，当前直接覆盖 |
+| **Mutation Runtime** | 统一变更语义 + CAS 并发写入保护（RuntimeRevisionGuard） | WE 3-K（轻量版：DB `generating` 字段）|
+| **Official Integration Kit** | `@tavern/sdk`（typed HTTP + SSE client）+ `@tavern/client-helpers`（StreamStateReducer / buildTimeline）| WE API 稳定后可参考生成 TS SDK |
+
+**TH 宏指令状态：** 基础 `{{char}}/{{user}}` 替换委托给调用方，后端未实现完整宏系统。WE 需自建 `macros.Expand()`（3-I.1）。
+
+**TH 渲染层：** TH 的 `apps/web` 是**创作工作台**（Narrative Workspace），不是游玩 UI，无 VN 渲染。ST 不使用 WebGL，是纯 HTML/CSS/JS。详见 `2026-04-08-th-rendering-and-macro-analysis.md`。
+
+**TH 架构定位（Beta3 稳定后）：** TH 目标是"开发者友好的无头 API 服务"，官方 Integration Kit（`@tavern/sdk` + `@tavern/client-helpers`）是面向第三方开发者的 SDK。WE 目标是"游戏发布平台"，不需要对外发布 SDK，但可参考 Integration Kit 的 StreamStateReducer 设计提取前端 composable。详见 `2026-04-08-th-beta3-architecture.md`。
+
+---
+
+## 七、一句话定位
 
 > WorkshopEngine 不是 SillyTavern 的替代品，也不试图完整复制 TavernHeadless。
 >
 > WE 的差异化在于：**游戏打包发布**（game-package.json）、**One-Shot 结构化 Parser**（含 VN Directives）、
-> **素材库**（search_material）和 **ScheduledTurn**（NPC 自主回合）。
+> **素材库**（search_material）、**ScheduledTurn**（NPC 自主回合）和**前端游玩 UI**（TH 无此能力）。
 >
-> 与 TH 的主要差距在于：**结构化 Memory**（JSON facts）、**MCP**、**Event Bus** 和 **Session 内分支**。
-> 这四个方向是接下来两个阶段的核心工作。
+> 与 TH 的主要差距在于：**宏展开**（3-I.1）、**VN 渲染资产系统**（4-I）、**MCP**（3-H 候选）和 **Session 内分支**（3-G）。

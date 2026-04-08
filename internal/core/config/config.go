@@ -42,6 +42,7 @@ type LLMConfig struct {
 	MaxTokens        int // LLM_MAX_TOKENS, default 2048
 	TokenBudget      int // LLM_TOKEN_BUDGET, default 8000
 	MaxHistoryFloors int // LLM_MAX_HISTORY_FLOORS, default 20
+	MaxToolIter      int // LLM_MAX_TOOL_ITER, default 5
 
 	// 采样参数（指针，nil = 不发送给 API）
 	Temperature      *float64 // LLM_TEMPERATURE
@@ -115,6 +116,7 @@ func Load() (*Config, error) {
 			MaxTokens:        envInt("LLM_MAX_TOKENS", 2048),
 			TokenBudget:      envInt("LLM_TOKEN_BUDGET", 8000),
 			MaxHistoryFloors: envInt("LLM_MAX_HISTORY_FLOORS", 20),
+			MaxToolIter:      envInt("LLM_MAX_TOOL_ITER", 5),
 
 			// 采样参数：nil = 不发送（让 API 使用模型默认值）
 			Temperature:      envFloat("LLM_TEMPERATURE"),

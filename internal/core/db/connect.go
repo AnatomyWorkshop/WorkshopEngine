@@ -29,6 +29,8 @@ func migrate(db *gorm.DB) error {
 		&GameSession{},
 		&Floor{},
 		&MessagePage{},
+		// Session 内分支（P-3G）
+		&SessionBranch{},
 		// 记忆系统
 		&Memory{},
 		&MemoryEdge{},
