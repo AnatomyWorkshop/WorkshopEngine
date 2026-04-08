@@ -6,17 +6,20 @@ package mvu_test
 import (
 	"context"
 	"fmt"
+	"math"
 	"strings"
 	"testing"
+	"time"
 
 	"mvu-backend/internal/core/llm"
-	"mvu-backend/internal/core/tokenizer"
 	"mvu-backend/internal/engine/parser"
 	"mvu-backend/internal/engine/pipeline"
 	"mvu-backend/internal/engine/processor"
 	"mvu-backend/internal/engine/prompt_ir"
 	"mvu-backend/internal/engine/scheduled"
+	"mvu-backend/internal/engine/tokenizer"
 	"mvu-backend/internal/engine/variable"
+	"mvu-backend/internal/social/forum"
 )
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -745,5 +748,87 @@ func TestLLM_NewClient_BaseURL_Trim(t *testing.T) {
 	c := llm.NewClient("https://api.example.com/v1/", "key", "model", 30, 0)
 	if c.BaseURL() != "https://api.example.com/v1" {
 		t.Fatalf("trailing slash not trimmed: %q", c.BaseURL())
+	}
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 11. TOKENIZER — extra formula coverage
+// ═══════════════════════════════════════════════════════════════════════════
+
+func TestTokenizer_PureCJK_Count(t *testing.T) {
+	// 6 CJK chars → 6*2/3 = 4 tokens
+	if got := tokenizer.Estimate("你好世界游戏"); got != 4 {
+		t.Errorf("Estimate(6 CJK) = %d, want 4", got)
+	}
+}
+
+func TestTokenizer_SingleCJK_Clamped(t *testing.T) {
+	// 1 CJK char: other=1, raw tokens = 0 → clamped to 1
+	if got := tokenizer.Estimate("中"); got != 1 {
+		t.Errorf("Estimate(\"中\") = %d, want 1", got)
+	}
+}
+
+func TestTokenizer_Messages_Empty(t *testing.T) {
+	if got := tokenizer.EstimateMessages(nil); got != 0 {
+		t.Errorf("EstimateMessages(nil) = %d, want 0", got)
+	}
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 12. FORUM — HotScore + RenderContent
+// ═══════════════════════════════════════════════════════════════════════════
+
+func TestForum_HotScore_Zero(t *testing.T) {
+	score := forum.HotScore(0, 0, time.Now().Add(-time.Second))
+	if score != 0 {
+		t.Errorf("HotScore(0,0,new) = %f, want 0", score)
+	}
+}
+
+func TestForum_HotScore_MoreRepliesWins(t *testing.T) {
+	base := time.Now().Add(-1 * time.Hour)
+	if forum.HotScore(10, 5, base) <= forum.HotScore(2, 1, base) {
+		t.Error("higher activity post should have higher hot score")
+	}
+}
+
+func TestForum_HotScore_OlderDecays(t *testing.T) {
+	newPost := forum.HotScore(5, 5, time.Now().Add(-1*time.Hour))
+	oldPost := forum.HotScore(5, 5, time.Now().Add(-72*time.Hour))
+	if newPost <= oldPost {
+		t.Error("newer post should have higher hot score than older post with same activity")
+	}
+}
+
+func TestForum_HotScore_Formula(t *testing.T) {
+	// score = (replies*2 + votes) / pow(ageHours+2, 1.5)
+	// ageHours ≈ 2 → score = (3*2+2) / pow(4,1.5) = 8/8 = 1.0
+	got := forum.HotScore(3, 2, time.Now().Add(-2*time.Hour))
+	want := 8.0 / math.Pow(4, 1.5)
+	if math.Abs(got-want) > 0.1 {
+		t.Errorf("HotScore = %f, want ≈ %f", got, want)
+	}
+}
+
+func TestForum_RenderContent_Bold(t *testing.T) {
+	svc := forum.New(nil, nil)
+	html, err := svc.RenderContent("**bold**")
+	if err != nil {
+		t.Fatalf("RenderContent: %v", err)
+	}
+	if !strings.Contains(html, "bold") {
+		t.Errorf("rendered HTML missing 'bold': %q", html)
+	}
+}
+
+func TestForum_RenderContent_XSS(t *testing.T) {
+	svc := forum.New(nil, nil)
+	html, err := svc.RenderContent("<script>alert('xss')</script> hello")
+	if err != nil {
+		t.Fatalf("RenderContent: %v", err)
+	}
+	if strings.Contains(html, "<script>") {
+		t.Errorf("XSS not sanitized: %q", html)
 	}
 }

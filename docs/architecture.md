@@ -434,7 +434,7 @@ TH 的文档质量是业内标杆。WE 借鉴其三个原则：
 
 新增宏（Phase 5-C.1 后）：调用 `macros.DefaultRegistry.Register(name, handler)` 注册，无需修改 `Expand()`。
 
-新增 API 路由：实现 Handler 函数，在 `cmd/server/main.go` 挂载到对应命名空间（`/api/v2/play` 或 `/api/v2/create`）。
+新增 API 路由：实现 Handler 函数，在 `cmd/server/main.go` 挂载到对应命名空间（`/api/play` 或 `/api/create`）。
 
 ### 13.3 官方集成包计划（Phase 5-B）
 

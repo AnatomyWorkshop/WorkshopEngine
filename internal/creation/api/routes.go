@@ -2,12 +2,10 @@ package creation
 
 import (
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
-	"unicode"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -15,17 +13,18 @@ import (
 	"gorm.io/gorm"
 	dbmodels "mvu-backend/internal/core/db"
 	"mvu-backend/internal/core/llm"
+	"mvu-backend/internal/core/util"
 	"mvu-backend/internal/creation/card"
 	"mvu-backend/internal/platform/auth"
 )
 
-// RegisterCreationRoutes 注册创作工具接口（/api/v2/create/...）
+// RegisterCreationRoutes 注册创作工具接口（/api/create/...）
 func RegisterCreationRoutes(rg *gin.RouterGroup, db *gorm.DB) {
 	create := rg.Group("/create")
 
 	// ── 角色卡接口 ────────────────────────────────────────────
 
-	// POST /api/v2/create/cards/import — 导入角色卡 PNG
+	// POST /api/create/cards/import — 导入角色卡 PNG
 	create.POST("/cards/import", func(c *gin.Context) {
 		file, err := c.FormFile("file")
 		if err != nil {
@@ -49,7 +48,7 @@ func RegisterCreationRoutes(rg *gin.RouterGroup, db *gorm.DB) {
 		tagsJSON, _ := json.Marshal(parsed.Tags)
 
 		cc := dbmodels.CharacterCard{
-			Slug:      slugify(parsed.Name),
+			Slug:      util.Slugify(parsed.Name, "card"),
 			Name:      parsed.Name,
 			Spec:      parsed.Spec,
 			Data:      rawJSON,
@@ -92,7 +91,7 @@ func RegisterCreationRoutes(rg *gin.RouterGroup, db *gorm.DB) {
 		}})
 	})
 
-	// GET /api/v2/create/cards — 角色卡列表
+	// GET /api/create/cards — 角色卡列表
 	create.GET("/cards", func(c *gin.Context) {
 		var cards []dbmodels.CharacterCard
 		db.Select("id, slug, name, spec, tags, avatar_url, created_at").
@@ -102,7 +101,7 @@ func RegisterCreationRoutes(rg *gin.RouterGroup, db *gorm.DB) {
 		c.JSON(http.StatusOK, gin.H{"code": 0, "data": cards})
 	})
 
-	// GET /api/v2/create/cards/:slug — 角色卡详情
+	// GET /api/create/cards/:slug — 角色卡详情
 	create.GET("/cards/:slug", func(c *gin.Context) {
 		var cc dbmodels.CharacterCard
 		if err := db.Where("slug = ?", c.Param("slug")).First(&cc).Error; err != nil {
@@ -114,14 +113,14 @@ func RegisterCreationRoutes(rg *gin.RouterGroup, db *gorm.DB) {
 
 	// ── 世界书接口 ────────────────────────────────────────────
 
-	// GET /api/v2/create/templates/:id/lorebook — 获取游戏世界书词条
+	// GET /api/create/templates/:id/lorebook — 获取游戏世界书词条
 	create.GET("/templates/:id/lorebook", func(c *gin.Context) {
 		var entries []dbmodels.WorldbookEntry
 		db.Where("game_id = ?", c.Param("id")).Order("priority DESC").Find(&entries)
 		c.JSON(http.StatusOK, gin.H{"code": 0, "data": entries})
 	})
 
-	// POST /api/v2/create/templates/:id/lorebook — 新增/更新词条
+	// POST /api/create/templates/:id/lorebook — 新增/更新词条
 	create.POST("/templates/:id/lorebook", func(c *gin.Context) {
 		var entry dbmodels.WorldbookEntry
 		if err := c.ShouldBindJSON(&entry); err != nil {
@@ -137,7 +136,7 @@ func RegisterCreationRoutes(rg *gin.RouterGroup, db *gorm.DB) {
 		c.JSON(http.StatusOK, gin.H{"code": 0, "data": entry})
 	})
 
-	// DELETE /api/v2/create/templates/:id/lorebook/:eid — 删除词条
+	// DELETE /api/create/templates/:id/lorebook/:eid — 删除词条
 	create.DELETE("/templates/:id/lorebook/:eid", func(c *gin.Context) {
 		db.Where("id = ? AND game_id = ?", c.Param("eid"), c.Param("id")).
 			Delete(&dbmodels.WorldbookEntry{})
@@ -146,7 +145,7 @@ func RegisterCreationRoutes(rg *gin.RouterGroup, db *gorm.DB) {
 
 	// ── 游戏模板接口 ──────────────────────────────────────────
 
-	// GET /api/v2/create/templates — 模板列表
+	// GET /api/create/templates — 模板列表
 	create.GET("/templates", func(c *gin.Context) {
 		status := c.DefaultQuery("status", "published")
 		query := db.Order("created_at DESC")
@@ -158,7 +157,7 @@ func RegisterCreationRoutes(rg *gin.RouterGroup, db *gorm.DB) {
 		c.JSON(http.StatusOK, gin.H{"code": 0, "data": templates})
 	})
 
-	// POST /api/v2/create/templates — 创建模板
+	// POST /api/create/templates — 创建模板
 	create.POST("/templates", func(c *gin.Context) {
 		var tmpl dbmodels.GameTemplate
 		if err := c.ShouldBindJSON(&tmpl); err != nil {
@@ -166,7 +165,7 @@ func RegisterCreationRoutes(rg *gin.RouterGroup, db *gorm.DB) {
 			return
 		}
 		if tmpl.Slug == "" {
-			tmpl.Slug = slugify(tmpl.Title)
+			tmpl.Slug = util.Slugify(tmpl.Title, "game")
 		}
 		if err := db.Create(&tmpl).Error; err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -175,7 +174,7 @@ func RegisterCreationRoutes(rg *gin.RouterGroup, db *gorm.DB) {
 		c.JSON(http.StatusOK, gin.H{"code": 0, "data": tmpl})
 	})
 
-	// PATCH /api/v2/create/templates/:id — 更新模板
+	// PATCH /api/create/templates/:id — 更新模板
 	create.PATCH("/templates/:id", func(c *gin.Context) {
 		var updates map[string]any
 		if err := c.ShouldBindJSON(&updates); err != nil {
@@ -193,7 +192,7 @@ func RegisterCreationRoutes(rg *gin.RouterGroup, db *gorm.DB) {
 		c.JSON(http.StatusOK, gin.H{"code": 0, "data": tmpl})
 	})
 
-	// DELETE /api/v2/create/templates/:id — 删除模板
+	// DELETE /api/create/templates/:id — 删除模板
 	create.DELETE("/templates/:id", func(c *gin.Context) {
 		if err := db.Where("id = ?", c.Param("id")).Delete(&dbmodels.GameTemplate{}).Error; err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -202,7 +201,7 @@ func RegisterCreationRoutes(rg *gin.RouterGroup, db *gorm.DB) {
 		c.JSON(http.StatusOK, gin.H{"code": 0, "data": gin.H{"id": c.Param("id"), "deleted": true}})
 	})
 
-	// DELETE /api/v2/create/cards/:slug — 删除角色卡
+	// DELETE /api/create/cards/:slug — 删除角色卡
 	create.DELETE("/cards/:slug", func(c *gin.Context) {
 		if err := db.Where("slug = ?", c.Param("slug")).Delete(&dbmodels.CharacterCard{}).Error; err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -211,7 +210,7 @@ func RegisterCreationRoutes(rg *gin.RouterGroup, db *gorm.DB) {
 		c.JSON(http.StatusOK, gin.H{"code": 0, "data": gin.H{"slug": c.Param("slug"), "deleted": true}})
 	})
 
-	// PATCH /api/v2/create/cards/:slug — 更新角色卡字段
+	// PATCH /api/create/cards/:slug — 更新角色卡字段
 	create.PATCH("/cards/:slug", func(c *gin.Context) {
 		var updates map[string]any
 		if err := c.ShouldBindJSON(&updates); err != nil {
@@ -239,7 +238,7 @@ func RegisterCreationRoutes(rg *gin.RouterGroup, db *gorm.DB) {
 	registerImportExportRoutes(create, db)
 }
 
-// registerLLMProfileRoutes 注册 LLM 配置 CRUD 路由（/api/v2/create/llm-profiles/...）
+// registerLLMProfileRoutes 注册 LLM 配置 CRUD 路由（/api/create/llm-profiles/...）
 func registerLLMProfileRoutes(rg *gin.RouterGroup, db *gorm.DB) {
 	lp := rg.Group("/llm-profiles")
 
@@ -488,7 +487,7 @@ func maskAPIKey(key string) string {
 // ── registerPresetEntryRoutes ─────────────────────────────────────────────────
 
 // registerPresetEntryRoutes 注册 Preset Entry CRUD 路由
-// （/api/v2/create/templates/:id/preset-entries/...）
+// （/api/create/templates/:id/preset-entries/...）
 //
 // # Preset Entry — 条目化 Prompt 组装
 //
@@ -607,7 +606,7 @@ func registerPresetEntryRoutes(rg *gin.RouterGroup, db *gorm.DB) {
 	})
 }
 
-// registerPresetToolRoutes 注册 Preset Tool CRUD 路由（/api/v2/create/templates/:id/tools）
+// registerPresetToolRoutes 注册 Preset Tool CRUD 路由（/api/create/templates/:id/tools）
 func registerPresetToolRoutes(rg *gin.RouterGroup, db *gorm.DB) {
 	pt := rg.Group("/templates/:id/tools")
 
@@ -703,7 +702,7 @@ func orBool(v *bool, def bool) bool {
 }
 
 // registerRegexProfileRoutes 注册 Regex Profile CRUD 路由
-// （/api/v2/create/templates/:id/regex-profiles/ 和 /regex-profiles/:pid/rules/）
+// （/api/create/templates/:id/regex-profiles/ 和 /regex-profiles/:pid/rules/）
 func registerRegexProfileRoutes(rg *gin.RouterGroup, db *gorm.DB) {
 	rp := rg.Group("/templates/:id/regex-profiles")
 
@@ -966,24 +965,4 @@ func registerMaterialRoutes(rg *gin.RouterGroup, db *gorm.DB) {
 		}
 		c.JSON(http.StatusOK, gin.H{"code": 0, "data": gin.H{"created": len(items)}})
 	})
-}
-
-// slugify 将名称转为 URL-safe slug（保留 ASCII 字母数字，中文用 uuid 兜底）
-func slugify(name string) string {
-	var result strings.Builder
-	for _, r := range name {
-		switch {
-		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
-			result.WriteRune(r)
-		case r >= 'A' && r <= 'Z':
-			result.WriteRune(unicode.ToLower(r))
-		case r == ' ' || r == '-' || r == '_':
-			result.WriteByte('-')
-		}
-		// 非 ASCII 字符（中文等）跳过
-	}
-	if result.Len() == 0 {
-		return fmt.Sprintf("card-%s", uuid.New().String()[:8])
-	}
-	return result.String()
 }

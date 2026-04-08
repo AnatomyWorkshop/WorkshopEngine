@@ -10,7 +10,7 @@ import (
 
 	"gorm.io/gorm"
 	dbmodels "mvu-backend/internal/core/db"
-	"mvu-backend/internal/core/tokenizer"
+	"mvu-backend/internal/engine/tokenizer"
 )
 
 // StoreConfig 记忆系统可配置参数（全部有默认值，零值均安全）。

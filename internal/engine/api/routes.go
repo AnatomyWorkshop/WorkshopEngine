@@ -12,7 +12,7 @@ import (
 	"mvu-backend/internal/engine/session"
 )
 
-// RegisterGameRoutes 注册游玩层接口（/api/v2/play/...）
+// RegisterGameRoutes 注册游玩层接口（/api/play/...）
 func RegisterGameRoutes(rg *gin.RouterGroup, engine *GameEngine) {
 	play := rg.Group("/play")
 

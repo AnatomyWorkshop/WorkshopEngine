@@ -22,7 +22,7 @@ import (
 
 	dbmodels "mvu-backend/internal/core/db"
 	"mvu-backend/internal/core/llm"
-	"mvu-backend/internal/core/tokenizer"
+	"mvu-backend/internal/engine/tokenizer"
 	"mvu-backend/internal/engine/prompt_ir"
 )
 

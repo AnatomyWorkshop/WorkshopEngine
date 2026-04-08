@@ -1,9 +1,9 @@
 //go:build integration
 
-// Package integration contains end-to-end tests that call the real LLM API.
-// Run with: go test -tags integration ./internal/integration/... -v
-// Requires .test/.env (loaded via LLM_* env vars or set manually).
-package integration
+// Integration tests: real LLM API calls.
+// Run: go test -tags integration -v -count=1
+// Requires LLM_API_KEY env var (LLM_BASE_URL + LLM_MODEL optional).
+package mvu_test
 
 import (
 	"context"

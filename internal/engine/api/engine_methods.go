@@ -10,7 +10,7 @@ import (
 	"gorm.io/gorm"
 	dbmodels "mvu-backend/internal/core/db"
 	"mvu-backend/internal/core/llm"
-	"mvu-backend/internal/core/tokenizer"
+	"mvu-backend/internal/engine/tokenizer"
 	"mvu-backend/internal/engine/parser"
 	"mvu-backend/internal/engine/pipeline"
 	"mvu-backend/internal/engine/processor"
