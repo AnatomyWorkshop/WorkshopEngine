@@ -199,6 +199,11 @@ func (e *GameEngine) PlayTurn(ctx context.Context, req TurnRequest) (*TurnRespon
 		e.db.Where("session_id = ? AND status IN ?", req.SessionID,
 			[]string{string(dbmodels.FloorGenerating), string(dbmodels.FloorFailed)}).
 			Order("seq DESC").First(&floor)
+		// Swipe 语义：若无 generating/failed 楼层，则对最后一条 committed 楼层重新生成
+		if floor.ID == "" {
+			e.db.Where("session_id = ? AND status = ?", req.SessionID, dbmodels.FloorCommitted).
+				Order("seq DESC").First(&floor)
+		}
 		if floor.ID == "" {
 			return nil, fmt.Errorf("no active floor to regen")
 		}

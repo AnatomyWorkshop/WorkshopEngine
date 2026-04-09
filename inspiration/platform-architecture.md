@@ -1,6 +1,6 @@
 # Platform 层架构说明
 
-> 版本：2026-04-04
+> 版本：2026-04-09（更新：play/ 包定位 + CW→GW 发行流边界）
 
 ---
 
@@ -10,9 +10,9 @@
 
 | 业务后端 | 路径 | 职责 |
 |---------|------|------|
-| `engine` | `internal/engine/` | 游戏主循环、Session/Floor/Page 生命周期 |
-| `creation` | `internal/creation/` | 角色卡、模板、世界书、素材管理 |
-| `social`（规划中）| `internal/social/` | 论坛、点赞、分享 |
+| `engine` | `internal/engine/` | 游戏主循环、Session/Floor/Page 生命周期、Prompt Pipeline |
+| `creation` | `internal/creation/` | 角色卡、模板、世界书、素材管理（CW 创作工具后端）|
+| `social` | `internal/social/` | 论坛、点赞、评论 |
 | `admin`（规划中）| `internal/admin/` | 后台管理 |
 
 这些后端不应各自实现认证、日志、限流、LLM Provider 管理。**Platform 层**是它们共用的技术基础，规则是：
@@ -37,6 +37,7 @@
         ┌───────────────┼────────────────────┐
         ▼               ▼                    ▼
   platform/gateway  platform/auth    platform/provider     ← Platform 层
+  platform/play ←── 新增（见下）
         │               │                    │
         └───────────────┼────────────────────┘
                         │ 引用（单向）
@@ -44,6 +45,46 @@
               ▼         ▼          ▼
          core/db    core/llm  core/config                  ← 底层基础设施
 ```
+
+---
+
+## CW → GW 发行流与路由归属
+
+```
+CW（创作工具）                    GW（游戏平台）
+internal/creation/               internal/platform/play/   internal/engine/
+      │                                   │                       │
+      │  创作者发布游戏包                   │  玩家发现游戏           │  玩家游玩
+      │  POST /api/create/templates/:id/publish
+      │  → status: draft → published      │                       │
+      │                                   │  GET /api/play/games  │
+      │                                   │  GET /api/play/games/:slug
+      │                                   │                       │
+      │                                   │  POST /api/play/sessions（创建会话）
+      │                                   │  → 调用 engine.CreateSession()
+      │                                   │                       │
+      │                                   │                       │  POST /api/play/sessions/:id/turn
+      │                                   │                       │  GET  /api/play/sessions/:id/stream
+      │                                   │                       │  ...（所有执行层路由）
+```
+
+**路由归属原则**：
+
+| 路由 | 归属 | 理由 |
+|------|------|------|
+| `GET /api/play/games` | `platform/play/` | 纯数据库查询，不需要 LLM，不需要 Pipeline |
+| `GET /api/play/games/:slug` | `platform/play/` | 同上 |
+| `GET /api/play/games/:id/worldbook-entries` | `platform/play/` | 只读查询 + 权限检查 |
+| `POST /api/play/sessions` | `platform/play/` | 入口逻辑，调用 engine.CreateSession() |
+| `GET /api/play/sessions` | `platform/play/` | 存档列表，纯查询 |
+| `POST /api/play/sessions/:id/turn` | `engine/api/` | 核心执行，需要 Pipeline |
+| `GET /api/play/sessions/:id/stream` | `engine/api/` | 核心执行，SSE 流式 |
+| `POST /api/play/sessions/:id/fork` | `engine/api/` | 执行层操作 |
+| `GET /api/play/sessions/:id/floors` | `engine/api/` | 引擎内部数据 |
+| `GET /api/play/sessions/:id/memories` | `engine/api/` | 引擎内部数据 |
+
+**当前状态**：`GET /api/play/games` 和 `GET /api/play/sessions` 暂时放在 `engine/api/routes.go`，  
+待 `platform/play/` 包建立后迁移。迁移不影响 API 路径，只是代码位置变化。
 
 ---
 

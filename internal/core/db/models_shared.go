@@ -15,13 +15,18 @@ type GameTemplate struct {
 	ID                   string         `gorm:"primaryKey;type:uuid;default:gen_random_uuid()" json:"id"`
 	Slug                 string         `gorm:"uniqueIndex;not null"                          json:"slug"`
 	Title                string         `gorm:"not null"                                      json:"title"`
-	Type                 string         `gorm:"not null;default:'text'"                       json:"type"` // text（纯文字）| light（轻前端）| rich（重前端）| 创作者自由描述
+	Type                 string         `gorm:"not null;default:'text'"                       json:"type"` // text | light | rich
+	ShortDesc            string         `gorm:"default:''"                                    json:"short_desc"`
+	Notes                string         `gorm:"type:text;default:''"                          json:"notes"`
 	Description          string         `json:"description"`
-	SystemPromptTemplate string         `gorm:"type:text"                                     json:"system_prompt_template"` // 支持 {{宏}} 变量展开
-	Config               datatypes.JSON `gorm:"type:jsonb;default:'{}'"                       json:"config"`                // 初始变量、资产配置等
+	SystemPromptTemplate string         `gorm:"type:text"                                     json:"system_prompt_template"`
+	Config               datatypes.JSON `gorm:"type:jsonb;default:'{}'"                       json:"config"`
 	CoverURL             string         `json:"cover_url"`
 	Status               string         `gorm:"default:'draft'"                               json:"status"` // draft | published
 	AuthorID             string         `gorm:"index"                                         json:"author_id"`
+	PlayCount            int64          `gorm:"default:0"                                     json:"play_count"`     // 累计游玩次数
+	FavoriteCount        int64          `gorm:"default:0"                                     json:"favorite_count"` // 累计收藏数
+	LikeCount            int64          `gorm:"default:0"                                     json:"like_count"`     // 累计点赞数
 	CreatedAt            time.Time      `json:"created_at"`
 	UpdatedAt            time.Time      `json:"updated_at"`
 }

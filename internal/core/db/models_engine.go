@@ -17,17 +17,16 @@ type GameSession struct {
 	ID                  string         `gorm:"primaryKey;type:uuid;default:gen_random_uuid()" json:"id"`
 	GameID              string         `gorm:"not null;index"                                json:"game_id"`
 	UserID              string         `gorm:"index"                                         json:"user_id"`
-	Title               string         `gorm:"default:''"                                    json:"title"`               // 会话标题（可选）
-	Status              string         `gorm:"default:'active'"                              json:"status"`              // active | archived
-	Variables           datatypes.JSON `gorm:"type:jsonb;default:'{}'"                       json:"variables"`           // Chat 级持久变量
-	MemorySummary       string         `gorm:"type:text"                                     json:"memory_summary"`      // 最新摘要快照（由 Worker 异步写入）
-	FloorCount          int            `gorm:"default:0"                                     json:"floor_count"`         // 已完成回合数，触发摘要的阈值依据
-	// 角色卡注入管线（M11）
-	CharacterCardID     string         `gorm:"default:''"                                    json:"character_card_id"`   // 关联角色卡 ID（空 = 无角色卡绑定）
-	CharacterSnapshot   datatypes.JSON `gorm:"type:jsonb;default:'null'"                     json:"character_snapshot"`  // pin 策略时的角色卡快照（session 创建时冻结）
-	// 并发生成保护（M13）
-	Generating          bool           `gorm:"default:false"                                 json:"generating"`          // true = 正在生成，防并发
-	GenerationMode      string         `gorm:"default:'reject'"                              json:"generation_mode"`     // reject（默认，直接 409）| queue（排队，P-3K 扩展）
+	Title               string         `gorm:"default:''"                                    json:"title"`
+	Status              string         `gorm:"default:'active'"                              json:"status"`   // active | archived
+	IsPublic            bool           `gorm:"default:false"                                 json:"is_public"` // 玩家公开存档（供游记分享）
+	Variables           datatypes.JSON `gorm:"type:jsonb;default:'{}'"                       json:"variables"`
+	MemorySummary       string         `gorm:"type:text"                                     json:"memory_summary"`
+	FloorCount          int            `gorm:"default:0"                                     json:"floor_count"`
+	CharacterCardID     string         `gorm:"default:''"                                    json:"character_card_id"`
+	CharacterSnapshot   datatypes.JSON `gorm:"type:jsonb;default:'null'"                     json:"character_snapshot"`
+	Generating          bool           `gorm:"default:false"                                 json:"generating"`
+	GenerationMode      string         `gorm:"default:'reject'"                              json:"generation_mode"`
 	CreatedAt           time.Time      `json:"created_at"`
 	UpdatedAt           time.Time      `json:"updated_at"`
 }

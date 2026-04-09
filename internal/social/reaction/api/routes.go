@@ -108,7 +108,7 @@ func RegisterReactionRoutes(rg *gin.RouterGroup, svc *reaction.Service) {
 func parseParams(c *gin.Context) (reaction.TargetType, reaction.Type, bool) {
 	tt := reaction.TargetType(c.Param("target_type"))
 	if !reaction.IsValidTarget(tt) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid target_type, must be: comment | forum_post | forum_reply"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid target_type, must be: comment | forum_post | forum_reply | game"})
 		return "", "", false
 	}
 	rt := reaction.Type(c.Param("type"))

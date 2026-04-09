@@ -39,10 +39,7 @@ func (s *Service) Add(targetType TargetType, targetID, authorID string, reaction
 		return result.Error
 	}
 
-	// 仅 like 更新目标计数（favorite 不增 vote_up）
-	if reactionType == TypeLike {
-		s.syncCount(targetType, targetID, +1)
-	}
+	s.syncCount(targetType, targetID, reactionType, +1)
 	return nil
 }
 
@@ -62,9 +59,7 @@ func (s *Service) Remove(targetType TargetType, targetID, authorID string, react
 		return ErrNotReacted
 	}
 
-	if reactionType == TypeLike {
-		s.syncCount(targetType, targetID, -1)
-	}
+	s.syncCount(targetType, targetID, reactionType, -1)
 	return nil
 }
 
@@ -182,15 +177,34 @@ func (s *Service) CheckMine(targetType TargetType, targetID, authorID string) Mi
 // 避免每次 COUNT(reactions)。此处采用原生 SQL 保证原子性。
 //
 // 失败不影响主流程（计数可从 reactions 表重建），静默记录。
-func (s *Service) syncCount(targetType TargetType, targetID string, delta int) {
+func (s *Service) syncCount(targetType TargetType, targetID string, reactionType Type, delta int) {
 	var table, col string
 	switch targetType {
 	case TargetComment:
 		table, col = "comments", "vote_up"
+		if reactionType != TypeLike {
+			return
+		}
 	case TargetForumPost:
 		table, col = "posts", "vote_up"
+		if reactionType != TypeLike {
+			return
+		}
 	case TargetForumReply:
 		table, col = "forum_replies", "vote_up"
+		if reactionType != TypeLike {
+			return
+		}
+	case TargetGame:
+		table = "game_templates"
+		switch reactionType {
+		case TypeLike:
+			col = "like_count"
+		case TypeFavorite:
+			col = "favorite_count"
+		default:
+			return
+		}
 	default:
 		return
 	}

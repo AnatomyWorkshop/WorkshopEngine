@@ -32,17 +32,26 @@ func (e *GameEngine) CreateSession(ctx context.Context, gameID, userID string) (
 	// 从 Config 或 template 字段读取 first_mes
 	firstMes := extractFirstMes(tmpl)
 
-	// 解析模板 Config 中的角色卡相关字段（M11）
+	// 解析模板 Config 中的角色卡相关字段（M11）+ initial_variables（C2）
 	var cfgMeta struct {
-		CharacterCardID    string `json:"character_card_id"`
-		CharSyncPolicy     string `json:"character_sync_policy"` // "pin"（默认）| "latest"
+		CharacterCardID  string         `json:"character_card_id"`
+		CharSyncPolicy   string         `json:"character_sync_policy"` // "pin"（默认）| "latest"
+		InitialVariables map[string]any `json:"initial_variables"`
 	}
 	_ = json.Unmarshal(tmpl.Config, &cfgMeta)
+
+	// 初始变量：优先使用 Config.initial_variables，否则空对象
+	initVars := []byte("{}")
+	if len(cfgMeta.InitialVariables) > 0 {
+		if b, err := json.Marshal(cfgMeta.InitialVariables); err == nil {
+			initVars = b
+		}
+	}
 
 	sess := dbmodels.GameSession{
 		GameID:    gameID,
 		UserID:    userID,
-		Variables: []byte("{}"),
+		Variables: initVars,
 	}
 
 	// 若模板指定了角色卡，预加载并在 pin 策略下写入快照（M11）
@@ -443,6 +452,11 @@ func (e *GameEngine) StreamTurn(ctx context.Context, req TurnRequest) (<-chan st
 			e.db.Where("session_id = ? AND status IN ?", req.SessionID,
 				[]string{string(dbmodels.FloorGenerating), string(dbmodels.FloorFailed)}).
 				Order("seq DESC").First(&floor)
+			// Swipe 语义：若无 generating/failed 楼层，则对最后一条 committed 楼层重新生成
+			if floor.ID == "" {
+				e.db.Where("session_id = ? AND status = ?", req.SessionID, dbmodels.FloorCommitted).
+					Order("seq DESC").First(&floor)
+			}
 			if floor.ID == "" {
 				errCh <- fmt.Errorf("no active floor to regen")
 				return
@@ -658,11 +672,12 @@ func (e *GameEngine) StreamTurn(ctx context.Context, req TurnRequest) (<-chan st
 
 // UpdateSessionReq PATCH /sessions/:id 请求体
 type UpdateSessionReq struct {
-	Title  string `json:"title"`
-	Status string `json:"status"` // active | archived
+	Title    string `json:"title"`
+	Status   string `json:"status"`    // active | archived
+	IsPublic *bool  `json:"is_public"` // 指针类型：nil = 不修改，false/true = 明确设置
 }
 
-// UpdateSession 更新会话标题或状态
+// UpdateSession 更新会话标题、状态或公开标志
 func (e *GameEngine) UpdateSession(ctx context.Context, sessionID string, req UpdateSessionReq) (*dbmodels.GameSession, error) {
 	var sess dbmodels.GameSession
 	if err := e.db.First(&sess, "id = ?", sessionID).Error; err != nil {
@@ -674,6 +689,9 @@ func (e *GameEngine) UpdateSession(ctx context.Context, sessionID string, req Up
 	}
 	if req.Status == "active" || req.Status == "archived" {
 		updates["status"] = req.Status
+	}
+	if req.IsPublic != nil {
+		updates["is_public"] = *req.IsPublic
 	}
 	if len(updates) == 0 {
 		return &sess, nil
@@ -1107,4 +1125,32 @@ func (e *GameEngine) PromptPreview(ctx context.Context, sessionID, userInput str
 		WorldbookHits: wbHits,
 		MemoryUsed:    memUsed,
 	}, nil
+}
+
+// publicGameView 构造玩家侧游戏视图，过滤创作者私有字段，提取 ui_config 子字段。
+func publicGameView(t dbmodels.GameTemplate) map[string]any {
+	var uiConfig map[string]any
+	if len(t.Config) > 0 {
+		var cfg map[string]any
+		if json.Unmarshal(t.Config, &cfg) == nil {
+			if v, ok := cfg["ui_config"]; ok {
+				uiConfig, _ = v.(map[string]any)
+			}
+		}
+	}
+	return map[string]any{
+		"id":             t.ID,
+		"slug":           t.Slug,
+		"title":          t.Title,
+		"type":           t.Type,
+		"short_desc":     t.ShortDesc,
+		"notes":          t.Notes,
+		"cover_url":      t.CoverURL,
+		"author_id":      t.AuthorID,
+		"play_count":     t.PlayCount,
+		"like_count":     t.LikeCount,
+		"favorite_count": t.FavoriteCount,
+		"ui_config":      uiConfig,
+		"created_at":     t.CreatedAt,
+	}
 }

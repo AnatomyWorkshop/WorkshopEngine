@@ -14,6 +14,7 @@ const (
 	TargetComment    TargetType = "comment"
 	TargetForumPost  TargetType = "forum_post"
 	TargetForumReply TargetType = "forum_reply"
+	TargetGame       TargetType = "game"
 )
 
 // Type 点赞/收藏类型（MVP 只做 like + favorite，coin 留枚举占位）
@@ -65,6 +66,7 @@ var validTargetTypes = map[TargetType]bool{
 	TargetComment:    true,
 	TargetForumPost:  true,
 	TargetForumReply: true,
+	TargetGame:       true,
 }
 
 // validTypes MVP 允许的互动类型
