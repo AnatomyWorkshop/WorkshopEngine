@@ -16,7 +16,7 @@
 | A-5 | `GET /api/play/games/worldbook/:id` | ✅ 已完成 | 世界书面板 |
 | A-6 | `GET /api/social/games/:id/stats` | ✅ 已完成（main.go 聚合端点）| StatsBar 评论数/游玩数 |
 | A-7 | `GET /api/play/games/:slug` 支持 UUID 查询 | ✅ 已完成（slug OR id::text）| PlayPage 刷新不丢标题 |
-| A-8 | `POST /api/play/sessions/:id/suggest`（AI 帮答）| ⬜ 待实现 | ChatInput AI 帮答按钮 |
+| A-8 | `POST /api/play/sessions/:id/suggest`（AI 帮答）| ✅ 已完成 | ChatInput AI 帮答按钮 |
 | A-9 | `GET /api/play/sessions/:id` 返回 `game_id` | ✅ 已完成（Session 结构体含 game_id）| PlayPage 游戏数据加载 |
 | A-10 | `comment_config` 暴露到 `publicGameView` | ⬜ 待实现 | 评论区模式切换 |
 | A-11 | 常驻角色 `GET/POST/DELETE /api/users/:id/resident_character` | 🔜 延后 | 常驻角色迁移 |
@@ -93,30 +93,17 @@
 
 ## 三、待实现
 
-### A-8：AI 帮答（`POST /api/play/sessions/:id/suggest`）
+### A-8：AI 帮答（`POST /api/play/sessions/:id/suggest`）✅ 2026-04-10
 
-**前端现状：** ChatInput 的 `✨ AI 帮答` 按钮已实现为 disabled 占位，等此端点就绪后接入。
+**实现位置：** `engine_methods.go` `Suggest()` + `routes.go` 路由
 
-**实现思路：**
+**实现方式：**
+1. 读取最近 N 楼对话历史（同 PlayTurn context 窗口）
+2. 注入 Impersonate 指令（玩家视角，1-2 句，第一人称）
+3. 调用 narrator slot LLM，`MaxTokens=200`
+4. 返回 `{ suggestion: string }`，不写入 Floor，不触发记忆整合
 
-```
-POST /api/play/sessions/:id/suggest
-→ { suggestion: string }
-```
-
-后端实现：
-1. 读取 session 的最近 N 楼对话历史（同 PlayTurn 的 context 构建逻辑）
-2. 在 system prompt 中注入 Impersonate 指令：
-   ```
-   你现在扮演玩家角色，根据当前剧情给出一条合理的玩家行动（1-2 句话，第一人称）。
-   不要扮演 AI 叙述者，只输出玩家会说的话。
-   ```
-3. 调用 LLM，返回纯文本建议（不写入 Floor，不触发 memory 整合）
-4. 前端收到后填入 textarea，玩家可编辑后发送
-
-**实现位置：** `internal/engine/api/engine_methods.go` 新增 `Suggest(ctx, sessionID) (string, error)`，`routes.go` 新增路由。
-
-**优先级：** 中（前端已有占位，不阻塞其他功能）
+**前端接入：** ChatInput 的 `✨ AI 帮答` 按钮解除 disabled，调用此端点后将 suggestion 填入 textarea，玩家可编辑后发送。
 
 ---
 
