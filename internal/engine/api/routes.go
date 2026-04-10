@@ -289,6 +289,16 @@ func RegisterGameRoutes(rg *gin.RouterGroup, engine *GameEngine) {
 		c.JSON(http.StatusOK, gin.H{"code": 0, "data": floors})
 	})
 
+	// POST /sessions/:id/suggest — AI 帮答（Impersonate 模式，不写入 Floor）
+	play.POST("/sessions/:id/suggest", func(c *gin.Context) {
+		suggestion, err := engine.Suggest(c.Request.Context(), c.Param("id"))
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"code": 0, "data": gin.H{"suggestion": suggestion}})
+	})
+
 	// GET /play/games/worldbook/:id — 玩家只读世界书（创作者开放后可见）
 	play.GET("/games/worldbook/:id", func(c *gin.Context) {
 		var tmpl dbmodels.GameTemplate

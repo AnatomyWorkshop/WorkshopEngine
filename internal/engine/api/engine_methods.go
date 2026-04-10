@@ -1127,6 +1127,50 @@ func (e *GameEngine) PromptPreview(ctx context.Context, sessionID, userInput str
 	}, nil
 }
 
+// Suggest 以 Impersonate 模式生成一条玩家视角的行动建议（不写入 Floor，不触发记忆整合）。
+// 前端收到后填入 textarea，玩家可编辑后发送。
+func (e *GameEngine) Suggest(ctx context.Context, sessionID string) (string, error) {
+	var sess dbmodels.GameSession
+	if err := e.db.First(&sess, "id = ?", sessionID).Error; err != nil {
+		return "", fmt.Errorf("session not found: %w", err)
+	}
+	var tmpl dbmodels.GameTemplate
+	if err := e.db.First(&tmpl, "id = ?", sess.GameID).Error; err != nil {
+		return "", fmt.Errorf("template not found: %w", err)
+	}
+
+	// 读取最近对话历史（与 PlayTurn 相同的 context 窗口）
+	history, _ := e.sessions.GetHistory(sessionID, "main", e.maxHistoryFloors)
+	var msgs []llm.Message
+	for _, m := range history {
+		msgs = append(msgs, llm.Message{Role: m["role"], Content: m["content"]})
+	}
+
+	// Impersonate 指令：让 LLM 扮演玩家，给出一条合理的行动
+	var tmplCfg struct {
+		CharName   string `json:"char_name"`
+		PlayerName string `json:"player_name"`
+	}
+	_ = json.Unmarshal(tmpl.Config, &tmplCfg)
+	playerName := tmplCfg.PlayerName
+	if playerName == "" {
+		playerName = "玩家"
+	}
+	impersonatePrompt := fmt.Sprintf(
+		"你现在扮演%s。根据当前剧情，给出一条%s会说的话或行动（1-2句话，第一人称，不要扮演叙述者）。",
+		playerName, playerName,
+	)
+	msgs = append(msgs, llm.Message{Role: "user", Content: impersonatePrompt})
+
+	client, opts := e.resolveSlot(sessionID, sess.UserID, "narrator")
+	opts.MaxTokens = 200 // 建议内容短小
+	resp, err := client.Chat(ctx, msgs, opts)
+	if err != nil {
+		return "", fmt.Errorf("llm suggest: %w", err)
+	}
+	return strings.TrimSpace(resp.Content), nil
+}
+
 // publicGameView 构造玩家侧游戏视图，过滤创作者私有字段，提取 ui_config 子字段。
 func publicGameView(t dbmodels.GameTemplate) map[string]any {
 	var uiConfig map[string]any
