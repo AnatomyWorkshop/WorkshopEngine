@@ -1,6 +1,6 @@
 # WorkshopEngine — 里程碑进度记录
 
-> 最后更新：2026-04-08（M13 并发生成保护完成）
+> 最后更新：2026-04-10（路由迁移 + Social 层完成，M14 Session 内分支已完成）
 > 代码库：`backend-v2/`，主语言：Go 1.22 + Gin + GORM + PostgreSQL
 
 WorkshopEngine (WE) 是面向 AI 文字游戏的无头 REST API 引擎。
@@ -36,12 +36,14 @@ backend-v2/
 │   ├── core/
 │   │   ├── db/         PostgreSQL + GORM（所有 DB 模型定义在此）
 │   │   ├── llm/        LLM 客户端（Chat / ChatStream / SSE）
-│   │   └── tokenizer/  Token 估算（BPE 兼容启发式）
+│   │   └── tokenizer/  Token 估算（BPE 兼容启发式）← 已从 core/ 移入 engine/
 │   ├── platform/
 │   │   ├── auth/       账户中间件（X-Account-ID，Phase 4-B 迁移为 JWT）
+│   │   ├── gateway/    CORS / RequestID / StructuredLogger 中间件
+│   │   ├── play/       玩家发现层（游戏列表/详情/worldbook/存档/创建会话）← 新增
 │   │   └── provider/   LLM Profile 注册表（slot 优先级解析）
 │   ├── engine/
-│   │   ├── api/        HTTP 层（PlayTurn / StreamTurn / PromptPreview 等）
+│   │   ├── api/        HTTP 层（执行层：turn/stream/regen/fork/memories 等）
 │   │   ├── macros/     宏展开（{{char}}/{{user}}/{{getvar::key}} 等）
 │   │   ├── memory/     记忆存取 + 异步整合 Worker
 │   │   ├── parser/     AI 响应解析（三层回退：XML → 编号列表 → fallback）
@@ -59,7 +61,10 @@ backend-v2/
 │   │   ├── card/       角色卡 PNG 解析（ST V2/V3）
 │   │   ├── lorebook/   世界书管理
 │   │   └── template/   游戏模板 CRUD + 游戏包导入导出
-│   ├── social/         (空，Phase 5-E 启动)
+│   ├── social/
+│   │   ├── reaction/   点赞/收藏（game/comment/post 通用）
+│   │   ├── comment/    游戏评论区（linear/nested 模式）
+│   │   └── forum/      社区论坛帖子（热度排序 + 全文搜索）
 │   └── integration/    (仅集成测试，Phase 5-A 迁移整理)
 └── docs/
     ├── database.md     DB schema 字段说明
@@ -70,12 +75,15 @@ backend-v2/
 
 ## 关键 API 端点速查
 
-### 游玩层 `/api/v2/play`
+### 游玩层 `/api/play`
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/games` | 已发布游戏列表（公开字段） |
-| POST | `/sessions` | 创建会话（自动注入 first_mes） |
+| GET | `/games` | 已发布游戏列表（公开字段）← platform/play |
+| GET | `/games/:slug` | 游戏详情（slug 或 UUID，含 comment_config）← platform/play |
+| GET | `/games/worldbook/:id` | 玩家只读世界书 ← platform/play |
+| GET | `/sessions` | 存档列表 ← platform/play |
+| POST | `/sessions` | 创建会话（自动注入 first_mes）← platform/play |
 | POST | `/sessions/:id/turn` | 同步一回合 |
 | POST | `/sessions/:id/regen` | 重新生成（Swipe） |
 | GET | `/sessions/:id/stream` | SSE 流式一回合 |
@@ -103,7 +111,7 @@ backend-v2/
 | PATCH | `/sessions/:id/memory-edges/:eid` | 修改 relation 类型 |
 | DELETE | `/sessions/:id/memory-edges/:eid` | 删除关系边 |
 
-### 创作层 `/api/v2/create`
+### 创作层 `/api/create`
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
@@ -126,6 +134,24 @@ backend-v2/
 | GET/POST/PATCH/DELETE | `/materials` | 素材库 CRUD |
 | POST | `/materials/batch` | 批量导入素材 |
 | POST | `/sessions/:id/archive` | 边界归档（生成结构化摘要） |
+
+### 社交层 `/api/social`
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST/DELETE | `/reactions/:target_type/:target_id/:type` | 点赞/收藏（game/comment/post）|
+| GET | `/reactions/mine/:target_type/:target_id` | 查自己的 reaction 状态 |
+| GET | `/reactions/counts` | 批量查计数 |
+| POST | `/games/:id/comments` | 发主楼评论 |
+| GET | `/games/:id/comments` | 评论列表（linear/nested）|
+| POST | `/comments/:id/replies` | 回复评论 |
+| POST/DELETE | `/comments/:id/vote` | 评论点赞/取消 |
+| GET | `/posts` | 帖子列表（?game_tag=&sort=hot\|new&q=）|
+| POST | `/posts` | 发帖 |
+| GET/PATCH/DELETE | `/posts/:id` | 帖子详情/编辑/删除 |
+| POST/DELETE | `/posts/:id/vote` | 帖子点赞/取消 |
+| GET/POST | `/posts/:id/replies` | 盖楼列表/盖楼 |
+| GET | `/games/:id/stats` | 游戏社交统计（comment_count + post_count）|
 
 ---
 
@@ -331,7 +357,7 @@ backend-v2/
 | M11 ✅ | 角色注入管线（CharacterCard → System Prompt，pin/latest 策略） | Phase 3 |
 | M12 ✅ | at_depth 世界书注入位置（Depth 字段 + Runner 动态插入）| Phase 3 |
 | M13 ✅ | 并发生成保护（Generating 字段 + FOR UPDATE + reject 模式）| Phase 3 |
-| M14 | Session 内分支（branch_id，Floor 内多时间线） | Phase 3 |
+| M14 ✅ | Session 内分支（branch_id，Floor 内多时间线） | Phase 3 |
 | M15 | API Key AES-256-GCM 加密 | Phase 4 |
 | M16 | JWT Auth（X-Account-ID → Bearer token） | Phase 4 |
 | M17 | Floor Run Phase SSE（生成阶段实时推送） | Phase 4 |
@@ -339,5 +365,5 @@ backend-v2/
 | M19 | Background Job Runtime（runtime_job 表，进程重启安全） | Phase 4 |
 | M20 | VN 渲染资产系统（Material.filename + 上传 API + 资产 URL 解析）| Phase 4 |
 | M21 | 官方集成包（@gw/sdk + @gw/play-helpers） | Phase 5 |
-| M22 | Social 层（Post / Comment / ShareLink） | Phase 5 |
+| M22 ✅ | Social 层（reaction / comment / forum）— 已在 GW 平台层实现 | Phase 5 |
 | M23 | 宏注册表重构 + 完整 ST 宏集合 | Phase 5 |
