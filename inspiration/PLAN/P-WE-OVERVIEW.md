@@ -374,40 +374,16 @@ func Expand(text string, ctx MacroContext) string { return DefaultRegistry.Expan
 
 ---
 
-### P-5E  Social 层启动 ⬜
+### P-5E  Social 层 ✅ 2026-04-08（已提前完成）
 
-`internal/social/` 包（当前空目录）的初始实现。
+`internal/social/` 已完整实现，包含 reaction / comment / forum 三个子包。详见 `GW-BACKEND-REFACTOR-PLAN.md` Task 4。
 
-**数据模型：**
-
-```go
-type Post struct {
-    ID        string; AuthorID string; SessionID string; GameID string
-    Title     string; Content  string; Tags      []string // JSONB
-    Status    string // draft | published | archived
-    CreatedAt, UpdatedAt time.Time
-}
-type Comment struct {
-    ID string; PostID string; AuthorID string; Content string
-    ParentID string; CreatedAt time.Time
-}
-type ShareLink struct {
-    Token string; SessionID string; FloorRange [2]int; ExpiresAt time.Time
-}
-```
-
-**API（`/api/v2/social/`）：**
-```
-POST   /posts              发布游记
-GET    /posts              公开列表（分页）
-GET    /posts/:id          详情
-PATCH  /posts/:id          编辑（仅作者）
-DELETE /posts/:id          删除
-POST   /posts/:id/comments 评论
-GET    /posts/:id/comments 评论列表
-POST   /share              生成分享链接
-GET    /share/:token       分享片段（公开，不需登录）
-```
+**实际实现（与原计划有差异）：**
+- `Post` → `forum.Post`（含 Markdown 渲染 + XSS 净化 + 热度公式 + 全文搜索）
+- `Comment` → `comment.Comment`（linear/nested 双模式 + 树形重建 + 软删除）
+- `ShareLink` → 未实现（当前通过 `is_public` session 替代，足够 MVP）
+- 新增 `reaction.Reaction`（game/comment/post 通用点赞/收藏）
+- 新增 `comment.GameCommentConfig`（评论区配置，含 default_mode）
 
 ---
 
