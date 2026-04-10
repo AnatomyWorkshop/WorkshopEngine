@@ -1,262 +1,123 @@
-# Engine API 路由迁移计划
+# Engine API 路由迁移 — 归档
 
-> 版本：2026-04-10 v2（详细迁移步骤 + 代码级规格）
+> 版本：2026-04-10 v3（归档已完成工作 + 后续改进备忘）
 > 状态：**已完成 2026-04-10**
-> 触发条件：现在主动推进，不等 A-11
 
 ---
 
-## 一、背景与动机
+## 一、已完成工作（归档）
 
-`engine/api/routes.go`（当前 564 行）混合了两类路由：
+### 背景
 
-| 类型 | 路由 | 问题 |
-|------|------|------|
-| 玩家发现层 | `GET /play/games`、`GET /play/games/:slug`、`GET /play/sessions`、`POST /play/sessions`、`GET /play/games/worldbook/:id` | 纯 DB 读，不需要 LLM，不属于 engine 职责 |
-| 执行层 | `POST /play/sessions/:id/turn`、`GET /play/sessions/:id/stream`、`POST /play/sessions/:id/regen` 等 | 核心执行，需要 Pipeline + LLM，属于 engine |
+`engine/api/routes.go`（原 564 行）混合了玩家发现层（纯 DB 读）和执行层（需要 LLM/Pipeline）两类路由，违反职责单一原则，且导致 A-10（`comment_config`）无法在 engine 层合法 import `social/comment`。
 
-**迁移的直接收益：**
-1. A-10（`comment_config` 暴露）在 `platform/play/` 层可以合法 import `social/comment`，不违反架构原则
-2. `engine/api/routes.go` 瘦身，职责单一
-3. 为 A-11（常驻角色）和未来 `platform/user/` 包铺路
+### 迁移结果
 
-**API 路径不变，前端无感知。**
-
----
-
-## 二、迁移后目标架构
+**新建 `internal/platform/play/`：**
 
 ```
 internal/platform/play/
-├── handler.go     ← 游戏查询、存档列表、会话创建、worldbook、comment_config
-└── routes.go      ← RegisterPlayRoutes(rg, h)
-
-internal/engine/api/
-├── game_loop.go   ← PlayTurn、StreamTurn（不变）
-├── engine_methods.go ← CreateSession、Suggest、ForkSession 等（不变）
-├── routes.go      ← 只保留执行层路由（turn/stream/regen/fork/floors/memories 等）
-└── verifier.go    ← 不变
+├── handler.go   ← Handler + SessionCreator 接口 + publicGameView + 5 个 handler 方法
+└── routes.go    ← RegisterPlayRoutes(rg, h)
 ```
 
-`platform/play/` 的依赖图：
-```
-platform/play/
-  ├── core/db          ← 读 GameTemplate（publicGameView 逻辑移入此包）
-  ├── core/util        ← ParsePage
-  ├── platform/auth    ← GetAccountID
-  ├── social/comment   ← 读 GameCommentConfig（A-10 在此实现）
-  └── engine/api       ← 通过 SessionCreator 接口调用 CreateSession
-                         （接口定义在 platform/play/，engine 实现它）
-```
-
----
-
-## 三、接口设计
-
-`platform/play/` 通过接口依赖 engine，不直接 import `engine/api` 包（避免循环依赖）：
-
-```go
-// internal/platform/play/handler.go
-
-// SessionCreator 由 engine.GameEngine 实现，platform/play 通过此接口调用
-type SessionCreator interface {
-    CreateSession(ctx context.Context, gameID, userID string) (string, error)
-}
-
-type Handler struct {
-    db      *gorm.DB
-    engine  SessionCreator
-    comment *comment.Service  // 用于读取 GameCommentConfig（A-10）
-}
-
-func NewHandler(db *gorm.DB, engine SessionCreator, commentSvc *comment.Service) *Handler {
-    return &Handler{db: db, engine: engine, comment: commentSvc}
-}
-```
-
-`GameEngine` 已有 `CreateSession` 方法，天然满足接口，无需修改。
-
----
-
-## 四、需要迁移的路由（完整列表）
-
-| 路由 | 当前位置 | 目标位置 | 迁移复杂度 |
-|------|---------|---------|-----------|
-| `GET /play/games` | `engine/api/routes.go:23` | `platform/play/handler.go` | 低（复制 handler，移除 `engine.db` 引用改为 `h.db`）|
-| `GET /play/games/:slug` | `engine/api/routes.go:71` | `platform/play/handler.go` | 低 |
-| `GET /play/games/worldbook/:id` | `engine/api/routes.go:303` | `platform/play/handler.go` | 低 |
-| `GET /play/sessions` | `engine/api/routes.go:253` | `platform/play/handler.go` | 低 |
-| `POST /play/sessions` | `engine/api/routes.go:84` | `platform/play/handler.go` | 中（调用 `h.engine.CreateSession()`）|
-
-**同时在 `platform/play/` 新增（A-10）：**
+**迁移的 5 条路由（从 engine/api/routes.go 移出）：**
 
 | 路由 | 说明 |
 |------|------|
-| `GET /play/games/:slug` 响应中附加 `comment_config` | 调用 `h.comment.GetConfig(game.ID)` |
+| `GET /play/games` | 游戏列表，分页/标签/类型/排序 |
+| `GET /play/games/:slug` | 游戏详情（slug 或 UUID），**附加 comment_config（A-10）** |
+| `GET /play/games/worldbook/:id` | 玩家只读世界书 |
+| `GET /play/sessions` | 存档列表，直接 GORM 查询（不再调用 engine.ListSessions）|
+| `POST /play/sessions` | 创建会话，调用 SessionCreator 接口 + 原子递增 play_count |
 
-**保留在 `engine/api/routes.go`（不迁移）：**
+**关键设计决策：**
+- `SessionCreator` 接口定义在 `platform/play/`，`GameEngine` 天然满足，无需修改 engine
+- `publicGameView` 复制到 `platform/play/handler.go`，同时从 `engine_methods.go` 删除（方案 A）
+- `GET /play/sessions` 改为直接 GORM 查询，不再依赖 `engine.ListSessions()`
+- `platform/play/` 合法 import `social/comment`，A-10 在 `getGame()` 中实现
 
-| 路由 | 理由 |
-|------|------|
-| `POST /play/sessions/:id/turn` | 核心执行，需要 Pipeline |
-| `GET /play/sessions/:id/stream` | SSE 流式，需要 Pipeline |
-| `POST /play/sessions/:id/regen` | 执行层 |
-| `POST /play/sessions/:id/suggest` | 执行层（调用 LLM）|
-| `POST /play/sessions/:id/fork` | 执行层 |
-| `GET /play/sessions/:id/floors` | 引擎内部数据 |
-| `GET /play/sessions/:id/floors/:fid/pages` | 引擎内部数据 |
-| `PATCH /play/sessions/:id/floors/:fid/pages/:pid/activate` | 引擎内部操作 |
-| `GET /play/sessions/:id/state` | 引擎内部数据 |
-| `GET /play/sessions/:id/variables` | 引擎内部数据 |
-| `PATCH /play/sessions/:id/variables` | 引擎内部操作 |
-| `PATCH /play/sessions/:id` | 更新 session 标题/状态/is_public |
-| `DELETE /play/sessions/:id` | 删除 session |
-| `GET /play/sessions/:id/memories` | 引擎内部数据 |
-| `POST /play/sessions/:id/memories` | 引擎内部操作 |
-| `PATCH /play/sessions/:id/memories/:mid` | 引擎内部操作 |
-| `DELETE /play/sessions/:id/memories/:mid` | 引擎内部操作 |
-| `POST /play/sessions/:id/memories/consolidate` | 引擎调试 |
-| `GET /play/sessions/:id/memory-edges` | 引擎内部数据 |
-| `GET /play/sessions/:id/memories/:mid/edges` | 引擎内部数据 |
-| `POST /play/sessions/:id/memory-edges` | 引擎调试 |
-| `PATCH /play/sessions/:id/memory-edges/:eid` | 引擎调试 |
-| `DELETE /play/sessions/:id/memory-edges/:eid` | 引擎调试 |
-| `GET /play/sessions/:id/branches` | 引擎内部数据 |
-| `POST /play/sessions/:id/floors/:fid/branch` | 引擎内部操作 |
-| `DELETE /play/sessions/:id/branches/:bid` | 引擎内部操作 |
-| `GET /play/sessions/:id/prompt-preview` | 引擎调试 |
-| `GET /play/sessions/:id/floors/:fid/snapshot` | 引擎调试 |
-| `GET /play/sessions/:id/tool-executions` | 引擎调试 |
+**文件变化：**
+- `engine/api/routes.go`：564 → 437 行（删除 5 条路由 + 相关 import）
+- `engine/api/engine_methods.go`：删除 `publicGameView`（~28 行）
+- `cmd/server/main.go`：新增 `playapi` import + `NewHandler` + `RegisterPlayRoutes`
+
+**验证：** `go build ./...` + `go vet ./...` 均通过，无编译错误。
 
 ---
 
-## 五、`publicGameView` 的处置
+## 二、A-10 实现（已完成）
 
-当前 `publicGameView` 是 `engine/api/engine_methods.go` 中的包级私有函数（`func publicGameView(t dbmodels.GameTemplate) map[string]any`）。
+`platform/play/handler.go` 的 `getGame()` 在游戏详情响应中附加：
 
-迁移后它需要在 `platform/play/` 中使用，有两个选项：
+```json
+"comment_config": { "default_mode": "linear" }
+```
 
-**方案 A（推荐）：** 在 `platform/play/handler.go` 中重新定义同名函数（内容完全相同）。迁移完成后删除 `engine_methods.go` 中的旧版本。
-
-**方案 B：** 提取到 `core/db` 包作为 `GameTemplate` 的方法（`func (t GameTemplate) PublicView() map[string]any`）。更优雅，但改动范围更大。
-
-**当前选择方案 A**，保持改动最小。方案 B 可在后续重构时做。
+前端 `CommentCore` 可读取此字段，不再需要硬编码 `linear`。
 
 ---
 
-## 六、A-10 在迁移后的实现
+## 三、后续改进备忘
 
-`platform/play/handler.go` 的游戏详情 handler：
+### 3-A：`publicGameView` 提取到 `core/db`（方案 B，低优先级）
+
+**当前状态：** `publicGameView` 定义在 `platform/play/handler.go`，是包级私有函数。
+
+**改进方向：** 提取为 `GameTemplate` 的方法：
 
 ```go
-func (h *Handler) getGame(c *gin.Context) {
-    slug := c.Param("slug")
-    var tmpl dbmodels.GameTemplate
-    err := h.db.Where("status = 'published' AND (slug = ? OR id::text = ?)", slug, slug).
-        First(&tmpl).Error
-    if err != nil {
-        c.JSON(http.StatusNotFound, gin.H{"error": "game not found"})
-        return
-    }
-
-    view := publicGameView(tmpl)
-
-    // A-10：附加 comment_config（platform/play 可合法 import social/comment）
-    cfg := h.comment.GetConfig(tmpl.ID)
-    view["comment_config"] = map[string]any{
-        "default_mode": cfg.DefaultMode,
-    }
-
-    c.JSON(http.StatusOK, gin.H{"code": 0, "data": view})
+// internal/core/db/models_shared.go
+func (t GameTemplate) PublicView() map[string]any {
+    // 同现有 publicGameView 逻辑
 }
 ```
 
----
+**收益：** 语义更清晰，`creation/api` 等其他包若需要构造公开视图可直接调用，不需要重复实现。
 
-## 七、`cmd/server/main.go` 变更
-
-```go
-// 新增 import
-import (
-    playapi "mvu-backend/internal/platform/play"
-)
-
-// 注册路由（在 gameapi.RegisterGameRoutes 之后）
-playHandler := playapi.NewHandler(gormDB, engine, commentSvc)
-playapi.RegisterPlayRoutes(api, playHandler)
-
-// gameapi.RegisterGameRoutes 保留，但其中已迁移的路由被删除
-gameapi.RegisterGameRoutes(api, engine)
-```
+**触发时机：** 当第二个包需要相同逻辑时再做，目前只有 `platform/play/` 使用，不值得提前抽象。
 
 ---
 
-## 八、迁移步骤（执行时按序）
+### 3-B：`comment_config` 响应字段扩展（低优先级）
 
+**当前响应：**
+```json
+"comment_config": { "default_mode": "linear" }
 ```
-Step 1：新建 internal/platform/play/ 目录
-        创建 handler.go（Handler 结构体 + SessionCreator 接口 + publicGameView）
-        创建 routes.go（RegisterPlayRoutes）
 
-Step 2：把 5 条路由的 handler 逻辑从 engine/api/routes.go 复制到 platform/play/handler.go
-        - GET /play/games
-        - GET /play/games/:slug（同时附加 comment_config，实现 A-10）
-        - GET /play/games/worldbook/:id
-        - GET /play/sessions
-        - POST /play/sessions
+**可扩展字段：** `enabled_modes`、`allow_anonymous`、`require_approval`（均在 `GameCommentConfig` 中已有）。
 
-Step 3：在 cmd/server/main.go 注册 platform/play/ 路由
-
-Step 4：从 engine/api/routes.go 删除已迁移的 5 条路由
-
-Step 5：从 engine/api/engine_methods.go 删除 publicGameView 函数
-
-Step 6：go build ./... 验证编译
-        go vet ./... 验证静态分析
-
-Step 7：手动测试关键路径
-        - GET /api/play/games → 返回游戏列表
-        - GET /api/play/games/:slug → 返回游戏详情（含 comment_config）
-        - POST /api/play/sessions → 创建 session，返回 session_id
-        - GET /api/play/sessions/:id/stream → SSE 流式正常（engine 路由未受影响）
-```
+**触发时机：** 前端需要展示评论模式切换 UI 或匿名评论开关时。
 
 ---
 
-## 九、风险与注意事项
+### 3-C：`GET /play/sessions` 分页一致性（低优先级）
 
-| 风险 | 说明 | 缓解 |
-|------|------|------|
-| `publicGameView` 重复定义 | 两处代码短暂并存 | Step 5 立即删除旧版本，不留死代码 |
-| `POST /play/sessions` 的 `play_count` 递增 | 当前在 `engine/api/routes.go:99` 做 `play_count + 1` | 迁移到 `platform/play/` 时保留此逻辑（`h.db.Model(&GameTemplate{}).UpdateColumn("play_count", gorm.Expr("play_count + 1"))`）|
-| `engine.db` 直接引用 | 迁移后 `platform/play/` 用 `h.db`，engine 路由中剩余的 `engine.db` 调用（snapshot、tool-executions 等）保持不变 | 迁移前确认 5 条路由的 handler 不依赖 `engine.sessions` 或 `engine.memStore`（确认：`GET /play/games`、`GET /play/sessions` 均只用 `engine.db` 或 `engine.ListSessions()`）|
-| `engine.ListSessions()` 调用 | `GET /play/sessions` 当前调用 `engine.ListSessions()`，迁移后改为直接 GORM 查询 | `ListSessions` 逻辑简单（`ORDER BY updated_at DESC`），直接在 handler 内写，不需要接口 |
-| `engine.db` 在 worldbook handler 中 | `GET /play/games/worldbook/:id` 用 `engine.db` 查 `WorldbookEntry` | 迁移后改为 `h.db`，无其他依赖 |
+**当前状态：** `listSessions` 直接读 `limit`/`offset` query param，上限 100，默认 20。
+
+**潜在问题：** 与其他接口的 `util.ParsePage`（上限 200，默认 20）行为不一致。
+
+**建议：** 统一改用 `util.ParsePage(c)`，或在 `util.ParsePage` 中支持自定义上限参数。
 
 ---
 
-## 十、迁移完成后的文件状态
+### 3-D：`platform/user/` 包规划（A-11 前置）
 
-```
-internal/platform/play/
-├── handler.go     ← 新建（~120 行）
-└── routes.go      ← 新建（~20 行）
+路由迁移完成后，`platform/play/` 包已建立，为 A-11（常驻角色）铺路。
 
-internal/engine/api/
-├── game_loop.go   ← 不变
-├── engine_methods.go ← 删除 publicGameView（~25 行减少）
-├── routes.go      ← 删除 5 条路由（~80 行减少，从 564 → ~484 行）
-└── verifier.go    ← 不变
-```
+A-11 的路由 `GET/POST/DELETE /api/users/:id/resident_character` 可归属：
+- **选项 1：** 放入 `platform/play/`（扩展现有包）
+- **选项 2：** 新建 `platform/user/`（职责更清晰，但多一个包）
+
+**建议：** 等 A-11 进入开发计划时再决策，不提前创建空包。
 
 ---
 
-## 十一、与其他文档的对接
+## 四、与其他文档的对接
 
-| 文档 | 关联 |
+| 文档 | 状态 |
 |------|------|
-| `GW-NEW-APIS-PLAN.md` | A-10 在迁移后实现，A-11 在迁移后规划 |
-| `GW-BACKEND-REFACTOR-PLAN.md` | Task 4（social 实现）已完成；路由迁移是独立后续步骤 |
-| `GW-SHARED-INFRA-PLAN.md` | `platform/play/` 的依赖图与第六章一致 |
-| `platform-architecture.md` | 路由归属表（第三节）与本文第四节一致 |
+| `GW-NEW-APIS-PLAN.md` | A-10 已归档为完成，A-11 待规划 |
+| `GW-BACKEND-REFACTOR-PLAN.md` | Task 4（social 实现）已完成；路由迁移独立完成 |
 | `P-WE-OVERVIEW.md` | 路由迁移不属于 WE Phase 计划，属于 GW 平台层工程 |

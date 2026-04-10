@@ -1,6 +1,6 @@
 # GW 新增 API — 实现计划与进度
 
-> 版本：2026-04-10 v3（归档已完成工作，保留待实现项）
+> 版本：2026-04-10 v4（A-10 归档，A-1~A-10 全部完成）
 > 范围：GW 前端开发所需的后端 API 缺口。
 
 ---
@@ -31,7 +31,7 @@
 
 - `GET /api/play/games`：分页、标签过滤、类型过滤、`new/hot` 排序
 - `GET /api/play/games/:slug`：slug 或 UUID 双路查询（`slug = ? OR id::text = ?`）
-- `publicGameView`（`engine_methods.go:1174`）：提取 `ui_config`，返回公开字段
+- `publicGameView`（现在在 `platform/play/handler.go`）：提取 `ui_config`，返回公开字段
 
 ### A-2：用户存档列表
 
@@ -68,21 +68,19 @@
 
 `GET /api/play/sessions/:id` 返回完整 `GameSession`，含 `game_id` 字段
 
----
+### A-10：comment_config 暴露到游戏详情响应
 
-## 三、待实现
+**实现位置：** `platform/play/handler.go` `getGame()`（2026-04-10，路由迁移后实现）
 
-### A-10：`comment_config` 暴露到游戏详情响应 ✅ 2026-04-10
-
-**实现位置：** `platform/play/handler.go` `getGame()`
-
-路由迁移完成后，`platform/play/` 可合法 import `social/comment`，在游戏详情响应中附加：
+`platform/play/` 合法 import `social/comment`，在游戏详情响应中附加：
 
 ```json
 "comment_config": { "default_mode": "linear" }
 ```
 
 ---
+
+## 三、待实现
 
 ### A-11：常驻角色
 
