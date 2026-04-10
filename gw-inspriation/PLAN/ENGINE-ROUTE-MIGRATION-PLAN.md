@@ -228,9 +228,10 @@ Step 7：手动测试关键路径
 | 风险 | 说明 | 缓解 |
 |------|------|------|
 | `publicGameView` 重复定义 | 两处代码短暂并存 | Step 5 立即删除旧版本，不留死代码 |
-| `engine/api/routes.go` 中 `engine.db` 引用 | 迁移后 engine 路由不再需要直接查 GameTemplate | 检查剩余路由是否还有 `engine.db.Model(&GameTemplate{})` 调用 |
-| `POST /play/sessions` 的 `play_count` 递增 | 当前在 `engine/api/routes.go:99` 做 `play_count + 1` | 迁移到 `platform/play/` 时保留此逻辑 |
-| `session.FloorWithPage` 类型跨包引用 | `GET /play/sessions` 返回 `[]GameSession`，不涉及此类型，无问题 | — |
+| `POST /play/sessions` 的 `play_count` 递增 | 当前在 `engine/api/routes.go:99` 做 `play_count + 1` | 迁移到 `platform/play/` 时保留此逻辑（`h.db.Model(&GameTemplate{}).UpdateColumn("play_count", gorm.Expr("play_count + 1"))`）|
+| `engine.db` 直接引用 | 迁移后 `platform/play/` 用 `h.db`，engine 路由中剩余的 `engine.db` 调用（snapshot、tool-executions 等）保持不变 | 迁移前确认 5 条路由的 handler 不依赖 `engine.sessions` 或 `engine.memStore`（确认：`GET /play/games`、`GET /play/sessions` 均只用 `engine.db` 或 `engine.ListSessions()`）|
+| `engine.ListSessions()` 调用 | `GET /play/sessions` 当前调用 `engine.ListSessions()`，迁移后改为直接 GORM 查询 | `ListSessions` 逻辑简单（`ORDER BY updated_at DESC`），直接在 handler 内写，不需要接口 |
+| `engine.db` 在 worldbook handler 中 | `GET /play/games/worldbook/:id` 用 `engine.db` 查 `WorldbookEntry` | 迁移后改为 `h.db`，无其他依赖 |
 
 ---
 
