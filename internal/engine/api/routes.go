@@ -6,100 +6,16 @@ import (
 	"io"
 	"net/http"
 	"strconv"
-	"strings"
 
 	"github.com/gin-gonic/gin"
-	"gorm.io/gorm"
 	dbmodels "mvu-backend/internal/core/db"
-	"mvu-backend/internal/core/util"
 	"mvu-backend/internal/engine/session"
 )
 
-// RegisterGameRoutes 注册游玩层接口（/api/play/...）
+// RegisterGameRoutes 注册游玩执行层接口（/api/play/...）
+// 注意：玩家发现层路由（游戏列表/详情/worldbook/存档列表/创建会话）已迁移至 platform/play/。
 func RegisterGameRoutes(rg *gin.RouterGroup, engine *GameEngine) {
 	play := rg.Group("/play")
-
-	// GET /play/games — 已发布游戏列表（玩家侧公开字段，支持分页/标签/排序）
-	play.GET("/games", func(c *gin.Context) {
-		limit, offset := util.ParsePage(c)
-
-		query := engine.db.Model(&dbmodels.GameTemplate{}).Where("status = 'published'")
-
-		// 标签过滤（逗号分隔，AND 语义：每个标签都必须存在）
-		if tags := c.Query("tags"); tags != "" {
-			for _, tag := range strings.Split(tags, ",") {
-				tag = strings.TrimSpace(tag)
-				if tag != "" {
-					query = query.Where("config->'tags' ? ?", tag)
-				}
-			}
-		}
-
-		// 游戏类型过滤
-		if t := c.Query("type"); t != "" {
-			query = query.Where("type = ?", t)
-		}
-
-		// 排序
-		switch c.DefaultQuery("sort", "new") {
-		case "hot", "play_count":
-			query = query.Order("play_count DESC, created_at DESC")
-		default:
-			query = query.Order("created_at DESC")
-		}
-
-		var total int64
-		query.Count(&total)
-
-		var templates []dbmodels.GameTemplate
-		query.Select("id, slug, title, type, short_desc, notes, cover_url, author_id, play_count, config, created_at").
-			Limit(limit).Offset(offset).Find(&templates)
-
-		games := make([]gin.H, 0, len(templates))
-		for _, t := range templates {
-			games = append(games, publicGameView(t))
-		}
-		c.JSON(http.StatusOK, gin.H{"code": 0, "data": gin.H{
-			"games":  games,
-			"total":  total,
-			"limit":  limit,
-			"offset": offset,
-		}})
-	})
-
-	// GET /play/games/:slug — 单个游戏详情（slug 或 UUID）
-	play.GET("/games/:slug", func(c *gin.Context) {
-		slug := c.Param("slug")
-		var tmpl dbmodels.GameTemplate
-		// 先按 slug 查，再按 UUID 查
-		err := engine.db.Where("status = 'published' AND (slug = ? OR id::text = ?)", slug, slug).
-			First(&tmpl).Error
-		if err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"error": "game not found"})
-			return
-		}
-		c.JSON(http.StatusOK, gin.H{"code": 0, "data": publicGameView(tmpl)})
-	})
-
-	play.POST("/sessions", func(c *gin.Context) {
-		var req struct {
-			GameID string `json:"game_id" binding:"required"`
-			UserID string `json:"user_id"`
-		}
-		if err := c.ShouldBindJSON(&req); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-			return
-		}
-		sessID, err := engine.CreateSession(c.Request.Context(), req.GameID, req.UserID)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
-		}
-		// 原子递增游玩次数
-		engine.db.Model(&dbmodels.GameTemplate{}).Where("id = ?", req.GameID).
-			UpdateColumn("play_count", gorm.Expr("play_count + 1"))
-		c.JSON(http.StatusOK, gin.H{"code": 0, "data": gin.H{"session_id": sessID}})
-	})
 
 	play.POST("/sessions/:id/turn", func(c *gin.Context) {
 		var req TurnRequest
@@ -249,23 +165,6 @@ func RegisterGameRoutes(rg *gin.RouterGroup, engine *GameEngine) {
 		c.JSON(http.StatusOK, gin.H{"code": 0, "data": vars})
 	})
 
-	// GET /sessions — 列出会话（?game_id=&user_id=&limit=&offset=）
-	play.GET("/sessions", func(c *gin.Context) {
-		limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
-		offset, _ := strconv.Atoi(c.DefaultQuery("offset", "0"))
-		sessions, err := engine.ListSessions(c.Request.Context(), ListSessionsReq{
-			GameID: c.Query("game_id"),
-			UserID: c.Query("user_id"),
-			Limit:  limit,
-			Offset: offset,
-		})
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
-		}
-		c.JSON(http.StatusOK, gin.H{"code": 0, "data": sessions})
-	})
-
 	// GET /sessions/:id/floors — 楼层列表（含激活页摘要）
 	// ?from=&to= 可选范围过滤（floor seq，用于游记剪辑）
 	play.GET("/sessions/:id/floors", func(c *gin.Context) {
@@ -297,32 +196,6 @@ func RegisterGameRoutes(rg *gin.RouterGroup, engine *GameEngine) {
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"code": 0, "data": gin.H{"suggestion": suggestion}})
-	})
-
-	// GET /play/games/worldbook/:id — 玩家只读世界书（创作者开放后可见）
-	play.GET("/games/worldbook/:id", func(c *gin.Context) {
-		var tmpl dbmodels.GameTemplate
-		if err := engine.db.First(&tmpl, "id = ? AND status = 'published'", c.Param("id")).Error; err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"error": "game not found"})
-			return
-		}
-		var cfg map[string]any
-		if err := json.Unmarshal(tmpl.Config, &cfg); err != nil || cfg["allow_player_worldbook_view"] != true {
-			c.JSON(http.StatusForbidden, gin.H{"error": "worldbook not public"})
-			return
-		}
-		var entries []struct {
-			ID      string `json:"id"`
-			Keys    any    `json:"keys"`
-			Content string `json:"content"`
-			Comment string `json:"comment"`
-		}
-		engine.db.Model(&dbmodels.WorldbookEntry{}).
-			Select("id, keys, content, comment").
-			Where("game_id = ? AND enabled = true", c.Param("id")).
-			Order("priority ASC").
-			Find(&entries)
-		c.JSON(http.StatusOK, gin.H{"code": 0, "data": entries})
 	})
 
 	// GET /sessions/:id/floors/:fid/pages — Swipe 页列表

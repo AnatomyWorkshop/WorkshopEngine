@@ -1170,31 +1170,3 @@ func (e *GameEngine) Suggest(ctx context.Context, sessionID string) (string, err
 	}
 	return strings.TrimSpace(resp.Content), nil
 }
-
-// publicGameView 构造玩家侧游戏视图，过滤创作者私有字段，提取 ui_config 子字段。
-func publicGameView(t dbmodels.GameTemplate) map[string]any {
-	var uiConfig map[string]any
-	if len(t.Config) > 0 {
-		var cfg map[string]any
-		if json.Unmarshal(t.Config, &cfg) == nil {
-			if v, ok := cfg["ui_config"]; ok {
-				uiConfig, _ = v.(map[string]any)
-			}
-		}
-	}
-	return map[string]any{
-		"id":             t.ID,
-		"slug":           t.Slug,
-		"title":          t.Title,
-		"type":           t.Type,
-		"short_desc":     t.ShortDesc,
-		"notes":          t.Notes,
-		"cover_url":      t.CoverURL,
-		"author_id":      t.AuthorID,
-		"play_count":     t.PlayCount,
-		"like_count":     t.LikeCount,
-		"favorite_count": t.FavoriteCount,
-		"ui_config":      uiConfig,
-		"created_at":     t.CreatedAt,
-	}
-}

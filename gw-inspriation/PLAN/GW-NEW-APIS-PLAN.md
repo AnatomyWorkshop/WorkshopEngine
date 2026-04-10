@@ -18,10 +18,10 @@
 | A-7 | `GET /api/play/games/:slug` 支持 UUID 查询 | ✅ |
 | A-8 | `POST /api/play/sessions/:id/suggest`（AI 帮答）| ✅ |
 | A-9 | `GET /api/play/sessions/:id` 返回 `game_id` | ✅ |
-| A-10 | `comment_config` 暴露到游戏详情响应 | 🔜 路由迁移后处理 |
+| A-10 | `comment_config` 暴露到游戏详情响应 | ✅ 路由迁移后已实现 |
 | A-11 | 常驻角色 `GET/POST/DELETE /api/users/:id/resident_character` | 🔜 延后 |
 
-**A-1 ~ A-9 全部完成，前端文本游戏全流程所需 API 就绪。**
+**A-1 ~ A-10 全部完成，前端文本游戏全流程所需 API 就绪。**
 
 ---
 
@@ -72,17 +72,15 @@
 
 ## 三、待实现
 
-### A-10：`comment_config` 暴露到游戏详情响应
+### A-10：`comment_config` 暴露到游戏详情响应 ✅ 2026-04-10
 
-**前端现状：** `CommentCore` 硬编码 `linear` 模式，等此字段就绪后读取。
+**实现位置：** `platform/play/handler.go` `getGame()`
 
-**问题：** `publicGameView` 在 `engine/api/` 包内，若直接 import `social/comment` 包会引入跨层依赖（engine → social，违反架构原则）。
+路由迁移完成后，`platform/play/` 可合法 import `social/comment`，在游戏详情响应中附加：
 
-**正确方案：** 在 `platform/play/` 层的游戏详情 handler 中，查询 `GameCommentConfig` 并附加到响应。`platform/play/` 可以同时 import `core/db`（读 GameTemplate）和 `social/comment`（读 GameCommentConfig），不违反依赖方向。
-
-**依赖：** 路由迁移（ENGINE-ROUTE-MIGRATION-PLAN.md）完成后自然解决。
-
-**MVP 处理：** 前端硬编码 `linear`，不阻塞。
+```json
+"comment_config": { "default_mode": "linear" }
+```
 
 ---
 
