@@ -1,6 +1,6 @@
 # WorkshopEngine — 整体开发计划
 
-> 版本：2026-04-08
+> 版本：2026-04-10
 > 来源：`implementation-plan.md` + `PROGRESS.md` 合并整理
 > 编号规则：`P-<阶段><序号>` — 例：`P-1A`（Phase 1，第 A 项）
 
@@ -148,15 +148,26 @@ ST 导入时 position 数字（0–4）映射到 WE 字符串 + depth 透传。
 
 ---
 
-### P-3H  MCP 协议接入 ⬜（暂缓）
+### P-3H  MCP 协议接入 ⬜（明确暂缓）
 
 **现状：** Preset Tool（HTTP 回调）已覆盖大多数云端集成场景。
-**触发条件：** 创作者需要接入本地 MCP 工具（文件系统、代码执行）时再做。
+
+**不做的理由（明确）：**
+1. WE 定位是游戏发布平台引擎，本地工具接入（文件系统、代码执行）不在核心场景
+2. Preset Tool（HTTP 回调）已覆盖云端集成；`resource:*` 工具已覆盖 AI 修改游戏规则的场景
+3. Deferred 执行模型（MCP 工具调用需用户确认）需要前端配合，GW 前端目前不具备此能力
+
+**重新评估条件：** GW 前端具备用户确认交互能力，且有创作者明确提出本地工具接入需求。
+
 **参照：** TH `apps/api/src/mcp/`（完整实现，含 stdio + HTTP 双传输模式）
 
 ---
 
 ## Phase 4 — 安全与平台工程 📋
+
+> **执行顺序说明：** P-4A 和 P-4B 是其他所有 Phase 4 工作的硬性前置条件，必须第一批完成。其他条目可在此之后并行推进。
+
+### 第一批（上线阻断，必须先完成）
 
 ### P-4A  API Key 加密存储（AES-256-GCM）⬜
 
@@ -173,6 +184,8 @@ ST 导入时 position 数字（0–4）映射到 WE 字符串 + depth 透传。
 **参照：** TH `apps/api/src/plugins/auth.ts`
 
 ---
+
+### 第二批（平台工程，可并行）
 
 ### P-4C  多 Provider 原生适配 ⬜
 
@@ -196,6 +209,24 @@ ST 导入时 position 数字（0–4）映射到 WE 字符串 + depth 透传。
 
 ---
 
+### P-4G  Background Job Runtime（DB 持久化）⬜
+
+**为什么做：** 进程重启时丢失未完成记忆整合任务是确定性的生产问题（服务器重启、OOM kill、部署更新），不是低概率风险。
+
+**具体工作：**
+1. 新增 `runtime_job` 表：`id`, `type`（`memory_consolidation`/`macro_compaction`/`archive`）, `session_id`, `payload JSONB`, `status`（`queued → leased → done / failed / dead`）, `lease_until`, `retry_count`, `error_log`
+2. `internal/engine/scheduler` — 替换现有 goroutine 为 job worker：`EnqueueJob` + `LeaseJob` + `CompleteJob`/`FailJob`
+3. 进程启动时执行 lease 恢复：将 `status=leased AND lease_until < now()` 的任务重置为 `queued`
+4. `dead letter` 策略：`retry_count >= 3` 时标记为 `dead`，写入 error_log，不再重试
+
+**改动量：** DB 迁移 + scheduler 重写约 200 行。
+
+**参照：** TH `apps/api/src/services/runtime-worker.ts` + `runtime-job-scheduler.ts` + `drizzle/0024_background_job_runtime.sql`
+
+---
+
+### 第三批（体验增强）
+
 ### P-4F  双层记忆压缩（micro / macro Memory）⬜
 
 **为什么做：** 当前单层 fact 记忆；长时间游玩后记忆条目本身超出注入预算。双层记忆让近期行为保持细粒度，历史行为自动压缩为高层摘要。
@@ -210,22 +241,6 @@ ST 导入时 position 数字（0–4）映射到 WE 字符串 + depth 透传。
 **改动量：** DB 迁移（Memory.Type 新枚举）+ Memory Worker + GetForInjection 约 150 行。
 
 **参照：** TH `packages/core/src/memory/memory-compaction-*.ts` + `memory-ingest-processor.ts` + `memory-injection-selector.ts`
-
----
-
-### P-4G  Background Job Runtime（DB 持久化）⬜
-
-**为什么做：** WE 覆盖所有 AI RP session 形式需要长期服务部署；进程重启时丢失未完成记忆整合任务不可接受。
-
-**具体工作：**
-1. 新增 `runtime_job` 表：`id`, `type`（`memory_consolidation`/`macro_compaction`/`archive`）, `session_id`, `payload JSONB`, `status`（`queued → leased → done / failed / dead`）, `lease_until`, `retry_count`, `error_log`
-2. `internal/engine/scheduler` — 替换现有 goroutine 为 job worker：`EnqueueJob` + `LeaseJob` + `CompleteJob`/`FailJob`
-3. 进程启动时执行 lease 恢复：将 `status=leased AND lease_until < now()` 的任务重置为 `queued`
-4. `dead letter` 策略：`retry_count >= 3` 时标记为 `dead`，写入 error_log，不再重试
-
-**改动量：** DB 迁移 + scheduler 重写约 200 行。
-
-**参照：** TH `apps/api/src/services/runtime-worker.ts` + `runtime-job-scheduler.ts` + `drizzle/0024_background_job_runtime.sql`
 
 ---
 

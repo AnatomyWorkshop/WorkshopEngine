@@ -423,8 +423,9 @@ TH 的文档质量是业内标杆。WE 借鉴其三个原则：
 |------|------|------|------|
 | DB 模型定义在 `core/db/`，与 engine/creation 业务逻辑分离不彻底 | `internal/core/db/models.go` | 修改模型需要改 core 包，导致所有包重新编译 | Phase 4 重构时按领域分拆 |
 | `engine/api/game_loop.go` 既组装 Prompt 又调用 LLM，单文件职责偏重 | `internal/engine/api/game_loop.go` | 不影响功能，测试覆盖困难 | Phase 4 拆分为 Runner + API 两层 |
-| 异步 Memory Worker 用 goroutine，进程重启丢失 | `internal/engine/memory/worker.go` | 低概率丢失整合任务 | M19 runtime_job 表 |
-| `X-Account-ID` 认证无加密，可伪造 | `internal/platform/auth/` | 内测可接受，上线前必须修复 | M16 JWT Auth |
+| 异步 Memory Worker 用 goroutine，进程重启丢失 | `internal/engine/memory/worker.go` | 确定性生产问题（进程重启/OOM kill/部署更新均会触发） | P-4G runtime_job 表（Phase 4 第二批） |
+| `X-Account-ID` 认证无加密，可伪造 | `internal/platform/auth/` | 内测可接受，上线前必须修复 | P-4B JWT Auth（Phase 4 第一批，上线阻断） |
+| Token 计数使用 BPE 兼容启发式（ASCII ÷4，CJK ×⅔），误差 ±15% | `internal/core/tokenizer/estimate.go` | 当前 2000 token 预算下 ±300 token 可接受；**触发条件**：需要支持 4K 以下上下文窗口的模型时引入 provider-specific 分词器 | 届时引入 tiktoken（OpenAI）/ sentencepiece（Gemini） |
 
 ### 13.2 扩展点
 
