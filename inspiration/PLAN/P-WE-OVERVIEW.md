@@ -281,28 +281,33 @@ ST 导入时 position 数字（0–4）映射到 WE 字符串 + depth 透传。
 
 ## Phase 5 — 集成包 + 社区层 + 架构治理 📋
 
-### P-5A  包结构治理 ⬜
+### P-5A  包结构治理 ⚡（部分完成）
+
+**已完成：**
+- `social/` 三个子包（reaction / comment / forum）已实现，依赖方向正确
+- `platform/play/` 新增，玩家发现层从 engine 分离
+- `engine/tokenizer/` 已从 `core/tokenizer/` 迁移
+- `core/db/models.go` 已拆分为 models_shared / models_engine / models_creation 三文件
 
 **目标状态（三层硬分离）：**
 
 ```
 internal/
-├── core/           ← DB连接、LLM客户端、tokenizer（无业务依赖）
-├── platform/       ← auth、LLM profile provider（跨层共享平台服务）
+├── core/           ← DB连接、LLM客户端（无业务依赖）
+├── platform/       ← auth、gateway、play、provider（跨层共享平台服务）
 ├── engine/         ← 游戏运行时（纯业务，无 HTTP 依赖）
-│   └── api/        ← HTTP 层（薄 handler）
+│   └── api/        ← HTTP 层（执行层路由）
 ├── creation/       ← 创作工具（独立于 engine，仅共享 core/db 模型）
 │   └── api/        ← HTTP 层
-├── social/         ← 社区层（完全独立，不引用 engine 内部包）
-│   └── api/        ← HTTP 层
+├── social/         ← 社区层（完全独立，不引用 engine 内部包）✅
 └── integration/    ← 集成层（webhook、事件分发、集成测试）
     └── tests/      ← 原 llm_test.go 移入此处
 ```
 
 **层间依赖规则（严格单向）：**
-- `engine` 不得引用 `creation` 或 `social`
-- `social` 不得引用 `engine` 内部包（只能通过 HTTP API 调用 engine）
-- `creation` 不得引用 `engine/api`（只能引用 `engine/pipeline` 等纯计算包）
+- `engine` 不得引用 `creation` 或 `social` ✅
+- `social` 不得引用 `engine` 内部包 ✅
+- `creation` 不得引用 `engine/api` ✅
 
 ---
 
