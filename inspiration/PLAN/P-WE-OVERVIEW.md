@@ -433,8 +433,8 @@ func Expand(text string, ctx MacroContext) string { return DefaultRegistry.Expan
 | 包结构治理（social/ 填充）| P-5A | Phase 5 |
 | 官方集成包（@gw/sdk + @gw/play-helpers）| P-5B | Phase 5 |
 | 宏注册表重构 + 完整宏集合 | P-5C | Phase 5 |
-| Social 层（Post / Comment / ShareLink）| P-5E | Phase 5 |
-| Session 内分支（branch_id）| P-3G | Phase 3（低优先级）|
+| Social 层（Post / Comment / ShareLink）| P-5E ✅ | Phase 5（已提前完成）|
+| Session 内分支（branch_id）| P-3G ✅ | Phase 3（已完成）|
 
 ### WE 明确不做
 
