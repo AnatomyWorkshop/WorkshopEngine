@@ -482,7 +482,9 @@ func (e *GameEngine) StreamTurn(ctx context.Context, req TurnRequest) (<-chan st
 		if req.APIKey != "" {
 			baseURL := req.BaseURL
 			if baseURL == "" {
-				baseURL = e.llmClient.BaseURL()
+				if c, ok := e.llmClient.(*llm.Client); ok {
+					baseURL = c.BaseURL()
+				}
 			}
 			client = llm.NewClient(baseURL, req.APIKey, llmOpts.Model, e.llmTimeoutSec, e.llmMaxRetries)
 		}
@@ -493,7 +495,7 @@ func (e *GameEngine) StreamTurn(ctx context.Context, req TurnRequest) (<-chan st
 		}
 
 		// ── Director 槽（可选，廉价模型预分析）────────────────────────
-		if dirClient, dirOpts, ok := func() (*llm.Client, llm.Options, bool) {
+		if dirClient, dirOpts, ok := func() (llm.Provider, llm.Options, bool) {
 			if e.registry == nil {
 				return nil, llm.Options{}, false
 			}
@@ -1128,8 +1130,10 @@ func (e *GameEngine) PromptPreview(ctx context.Context, sessionID, userInput str
 }
 
 // Suggest 以 Impersonate 模式生成一条玩家视角的行动建议（不写入 Floor，不触发记忆整合）。
+// 使用完整 Prompt Pipeline（世界书 / Preset / 记忆 / 角色注入），与 PlayTurn 上下文一致。
 // 前端收到后填入 textarea，玩家可编辑后发送。
 func (e *GameEngine) Suggest(ctx context.Context, sessionID string) (string, error) {
+	// ── 1. 加载会话与模板 ──────────────────────────────────────
 	var sess dbmodels.GameSession
 	if err := e.db.First(&sess, "id = ?", sessionID).Error; err != nil {
 		return "", fmt.Errorf("session not found: %w", err)
@@ -1139,19 +1143,73 @@ func (e *GameEngine) Suggest(ctx context.Context, sessionID string) (string, err
 		return "", fmt.Errorf("template not found: %w", err)
 	}
 
-	// 读取最近对话历史（与 PlayTurn 相同的 context 窗口）
-	history, _ := e.sessions.GetHistory(sessionID, "main", e.maxHistoryFloors)
-	var msgs []llm.Message
-	for _, m := range history {
-		msgs = append(msgs, llm.Message{Role: m["role"], Content: m["content"]})
-	}
+	var wbEntries []dbmodels.WorldbookEntry
+	e.db.Where("game_id = ? AND enabled = true", sess.GameID).Find(&wbEntries)
 
-	// Impersonate 指令：让 LLM 扮演玩家，给出一条合理的行动
+	var presetEntries []dbmodels.PresetEntry
+	e.db.Where("game_id = ? AND enabled = true", sess.GameID).
+		Order("injection_order ASC").Find(&presetEntries)
+
+	var dbRegexRules []dbmodels.RegexRule
+	e.db.Joins("JOIN regex_profiles ON regex_rules.profile_id = regex_profiles.id::text").
+		Where("regex_profiles.game_id = ? AND regex_profiles.enabled = true AND regex_rules.enabled = true", sess.GameID).
+		Order("regex_rules.order ASC").Find(&dbRegexRules)
+
 	var tmplCfg struct {
-		CharName   string `json:"char_name"`
-		PlayerName string `json:"player_name"`
+		MemoryLabel          string `json:"memory_label"`
+		CharName             string `json:"char_name"`
+		PlayerName           string `json:"player_name"`
+		PersonaName          string `json:"persona_name"`
+		WorldbookGroupCap    int    `json:"worldbook_group_cap"`
+		WorldbookTokenBudget int    `json:"worldbook_token_budget"`
 	}
 	_ = json.Unmarshal(tmpl.Config, &tmplCfg)
+
+	// ── 2. 变量沙箱 ────────────────────────────────────────────
+	var chatVars map[string]any
+	_ = json.Unmarshal(sess.Variables, &chatVars)
+	sb := variable.NewSandbox(nil, chatVars, nil, nil, nil)
+
+	// ── 3. 记忆摘要 ────────────────────────────────────────────
+	currentStage, _ := chatVars["game_stage"].(string)
+	memorySummary, _ := e.memStore.GetForInjection(sessionID, e.memoryTokenBudget, currentStage)
+
+	// ── 4. 历史消息 ────────────────────────────────────────────
+	history, _ := e.sessions.GetHistory(sessionID, "main", e.maxHistoryFloors)
+
+	// ── 5. 转换 IR ─────────────────────────────────────────────
+	var wbIR []prompt_ir.WorldbookEntry
+	for _, entry := range wbEntries {
+		var keys, secondaryKeys []string
+		_ = json.Unmarshal(entry.Keys, &keys)
+		_ = json.Unmarshal(entry.SecondaryKeys, &secondaryKeys)
+		wbIR = append(wbIR, prompt_ir.WorldbookEntry{
+			ID: entry.ID, Keys: keys, SecondaryKeys: secondaryKeys,
+			SecondaryLogic: entry.SecondaryLogic, Content: entry.Content,
+			Constant: entry.Constant, Priority: entry.Priority,
+			ScanDepth: entry.ScanDepth, Position: entry.Position, Depth: entry.Depth,
+			WholeWord: entry.WholeWord, Enabled: entry.Enabled,
+			Group: entry.Group, GroupWeight: entry.GroupWeight,
+		})
+	}
+	var regexRules []prompt_ir.RegexRule
+	for _, r := range dbRegexRules {
+		regexRules = append(regexRules, prompt_ir.RegexRule{
+			Pattern: r.Pattern, Replacement: r.Replacement,
+			ApplyTo: r.ApplyTo, Enabled: r.Enabled,
+		})
+	}
+	var presetIR []prompt_ir.PresetEntry
+	for _, pe := range presetEntries {
+		presetIR = append(presetIR, prompt_ir.PresetEntry{
+			Identifier: pe.Identifier, Name: pe.Name, Role: pe.Role,
+			Content: pe.Content, InjectionPosition: pe.InjectionPosition,
+			InjectionOrder: pe.InjectionOrder, Enabled: pe.Enabled,
+			IsSystemPrompt: pe.IsSystemPrompt,
+		})
+	}
+
+	// ── 6. Impersonate 指令替代用户输入 ───────────────────────
 	playerName := tmplCfg.PlayerName
 	if playerName == "" {
 		playerName = "玩家"
@@ -1160,11 +1218,47 @@ func (e *GameEngine) Suggest(ctx context.Context, sessionID string) (string, err
 		"你现在扮演%s。根据当前剧情，给出一条%s会说的话或行动（1-2句话，第一人称，不要扮演叙述者）。",
 		playerName, playerName,
 	)
-	msgs = append(msgs, llm.Message{Role: "user", Content: impersonatePrompt})
+	var recentMsgs []prompt_ir.Message
+	for _, m := range history {
+		recentMsgs = append(recentMsgs, prompt_ir.Message{Role: m["role"], Content: m["content"]})
+	}
+	recentMsgs = append(recentMsgs, prompt_ir.Message{Role: "user", Content: impersonatePrompt})
 
+	// ── 7. 运行完整 Prompt Pipeline ───────────────────────────
+	pipelineCtx := &prompt_ir.ContextData{
+		Mode: prompt_ir.ModeNative,
+		Config: prompt_ir.GameConfig{
+			SystemPromptTemplate: tmpl.SystemPromptTemplate,
+			WorldbookEntries:     wbIR,
+			PresetEntries:        presetIR,
+			MemorySummary:        memorySummary,
+			MemoryLabel:          tmplCfg.MemoryLabel,
+			RegexRules:           regexRules,
+			WorldbookGroupCap:    tmplCfg.WorldbookGroupCap,
+			WorldbookTokenBudget: tmplCfg.WorldbookTokenBudget,
+		},
+		Variables:            sb.Flatten(),
+		RecentMessages:       recentMsgs,
+		TokenBudget:          e.tokenBudget,
+		CharName:             tmplCfg.CharName,
+		UserName:             tmplCfg.PlayerName,
+		PersonaName:          tmplCfg.PersonaName,
+		CharacterDescription: e.loadCharacterDescription(sess, tmplCfg.CharName),
+	}
+	runner := pipeline.NewRunner()
+	finalMessages, err := runner.Execute(pipelineCtx)
+	if err != nil {
+		return "", fmt.Errorf("suggest pipeline: %w", err)
+	}
+
+	// ── 8. 调用 narrator 槽，MaxTokens=200 ────────────────────
+	var llmMsgs []llm.Message
+	for _, m := range finalMessages {
+		llmMsgs = append(llmMsgs, llm.Message{Role: m["role"], Content: m["content"]})
+	}
 	client, opts := e.resolveSlot(sessionID, sess.UserID, "narrator")
-	opts.MaxTokens = 200 // 建议内容短小
-	resp, err := client.Chat(ctx, msgs, opts)
+	opts.MaxTokens = 200
+	resp, err := client.Chat(ctx, llmMsgs, opts)
 	if err != nil {
 		return "", fmt.Errorf("llm suggest: %w", err)
 	}

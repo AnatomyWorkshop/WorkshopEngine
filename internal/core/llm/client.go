@@ -117,6 +117,9 @@ func NewClient(baseURL, apiKey, model string, timeoutSec, maxRetries int) *Clien
 // BaseURL 返回客户端的 API 地址（供需要临时覆盖 key/url 的调用方读取）
 func (c *Client) BaseURL() string { return c.baseURL }
 
+// ID 返回 provider 标识，满足 Provider 接口。
+func (c *Client) ID() string { return "openai-compatible" }
+
 // TimeoutSec 返回非流式调用超时秒数（供 registry 克隆时复用）
 func (c *Client) TimeoutSec() int {
 	if c.httpClient == nil {

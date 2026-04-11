@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"math/rand"
 
-	"gorm.io/gorm"
 	dbmodels "mvu-backend/internal/core/db"
 	"mvu-backend/internal/core/llm"
 	"mvu-backend/internal/engine/memory"
@@ -15,10 +14,13 @@ import (
 	"mvu-backend/internal/engine/processor"
 	"mvu-backend/internal/engine/prompt_ir"
 	"mvu-backend/internal/engine/scheduled"
+	"mvu-backend/internal/engine/scheduler"
 	"mvu-backend/internal/engine/session"
 	"mvu-backend/internal/engine/tools"
 	"mvu-backend/internal/engine/variable"
 	"mvu-backend/internal/platform/provider"
+
+	"gorm.io/gorm"
 )
 
 // GenParams 前端或配置层可覆盖的生成参数（全部可选）。
@@ -75,11 +77,12 @@ type TurnResponse struct {
 
 // GameEngine 完整游戏引擎（依赖注入）
 type GameEngine struct {
-	db         *gorm.DB
-	llmClient  *llm.Client        // env 配置的默认客户端（兜底）
-	registry   *provider.Registry // 动态 Provider 注册表（可 nil，退化为 llmClient）
-	sessions   *session.Manager
-	memStore   *memory.Store
+	db        *gorm.DB
+	llmClient llm.Provider        // env 配置的默认客户端（兜底）
+	registry  *provider.Registry // 动态 Provider 注册表（可 nil，退化为 llmClient）
+	sessions  *session.Manager
+	memStore  *memory.Store
+	sched     *scheduler.Scheduler // 后台任务调度器（P-4G）
 
 	// 运行时参数（来自配置，避免硬编码）
 	memoryTriggerRounds int
@@ -94,7 +97,7 @@ type GameEngine struct {
 }
 
 // NewGameEngine 构造游戏引擎（所有依赖从外部注入，方便单测）
-func NewGameEngine(db *gorm.DB, llmClient *llm.Client, reg *provider.Registry, memoryTriggerRounds, maxTokens, tokenBudget, maxHistoryFloors, memoryMaxTokens, memoryTokenBudget, llmTimeoutSec, llmMaxRetries, maxToolIter int) *GameEngine {
+func NewGameEngine(db *gorm.DB, llmClient llm.Provider, reg *provider.Registry, sched *scheduler.Scheduler, memoryTriggerRounds, maxTokens, tokenBudget, maxHistoryFloors, memoryMaxTokens, memoryTokenBudget, llmTimeoutSec, llmMaxRetries, maxToolIter int) *GameEngine {
 	if maxTokens <= 0 {
 		maxTokens = 2048
 	}
@@ -125,6 +128,7 @@ func NewGameEngine(db *gorm.DB, llmClient *llm.Client, reg *provider.Registry, m
 		registry:            reg,
 		sessions:            session.NewManager(db),
 		memStore:            memory.NewStore(db),
+		sched:               sched,
 		memoryTriggerRounds: memoryTriggerRounds,
 		maxTokens:           maxTokens,
 		tokenBudget:         tokenBudget,
@@ -134,6 +138,17 @@ func NewGameEngine(db *gorm.DB, llmClient *llm.Client, reg *provider.Registry, m
 		llmTimeoutSec:       llmTimeoutSec,
 		llmMaxRetries:       llmMaxRetries,
 		maxToolIter:         maxToolIter,
+	}
+}
+
+// triggerMemoryConsolidation 将记忆整合任务入队到 scheduler（P-4G DB 持久化）。
+// history 和 floorCount 参数保留签名兼容，实际由 Worker 从 DB 重新读取。
+func (e *GameEngine) triggerMemoryConsolidation(sessionID string, _ []map[string]string, floorCount int) {
+	if e.sched == nil {
+		return
+	}
+	if err := e.sched.EnqueueIfDue(sessionID, floorCount, e.memoryTriggerRounds); err != nil {
+		fmt.Printf("[engine] enqueue memory consolidation %s: %v\n", sessionID, err)
 	}
 }
 
@@ -168,14 +183,14 @@ func (e *GameEngine) PlayTurn(ctx context.Context, req TurnRequest) (*TurnRespon
 
 	// 解析模板 Config JSONB（memory_label / fallback_options / enabled_tools 等可选字段）
 	var tmplCfg struct {
-		MemoryLabel       string                  `json:"memory_label"`
-		FallbackOptions   []string                `json:"fallback_options"`
-		EnabledTools      []string                `json:"enabled_tools"`
-		ScheduledTurns    []scheduled.TriggerRule `json:"scheduled_turns"`
-		DirectorPrompt    string                  `json:"director_prompt"`  // 可选，Director 槽的分析指令
-		VerifierPrompt    string                  `json:"verifier_prompt"`  // 可选，Verifier 槽校验指令（覆盖默认）
-		WorldbookGroupCap int                     `json:"worldbook_group_cap"` // 同组词条最多保留数（默认 1）
-		WorldbookTokenBudget int                  `json:"worldbook_token_budget"` // 世界书 token 总预算（0=不限制）
+		MemoryLabel          string                  `json:"memory_label"`
+		FallbackOptions      []string                `json:"fallback_options"`
+		EnabledTools         []string                `json:"enabled_tools"`
+		ScheduledTurns       []scheduled.TriggerRule `json:"scheduled_turns"`
+		DirectorPrompt       string                  `json:"director_prompt"`        // 可选，Director 槽的分析指令
+		VerifierPrompt       string                  `json:"verifier_prompt"`        // 可选，Verifier 槽校验指令（覆盖默认）
+		WorldbookGroupCap    int                     `json:"worldbook_group_cap"`    // 同组词条最多保留数（默认 1）
+		WorldbookTokenBudget int                     `json:"worldbook_token_budget"` // 世界书 token 总预算（0=不限制）
 		// ST 宏展开相关字段：对应 {{char}} / {{user}} / {{persona}}
 		CharName    string `json:"char_name"`    // {{char}} → 角色名（默认空，由模板标题或角色卡 fallback）
 		PlayerName  string `json:"player_name"`  // {{user}} → 玩家名（默认"你"）
@@ -352,7 +367,7 @@ func (e *GameEngine) PlayTurn(ctx context.Context, req TurnRequest) (*TurnRespon
 			FallbackOptions:      tmplCfg.FallbackOptions,
 			RegexRules:           regexRules,
 			WorldbookGroupCap:    tmplCfg.WorldbookGroupCap,
-		WorldbookTokenBudget: tmplCfg.WorldbookTokenBudget,
+			WorldbookTokenBudget: tmplCfg.WorldbookTokenBudget,
 		},
 		Variables:      sb.Flatten(),
 		RecentMessages: recentMsgs,
@@ -396,7 +411,7 @@ func (e *GameEngine) PlayTurn(ctx context.Context, req TurnRequest) (*TurnRespon
 	// 若创作者为 "director" slot 绑定了 LLM Profile，则在主生成前调用一次，
 	// 把分析结果作为额外 system 消息插入 llmMsgs 首位。
 	// Director 失败不阻断回合，静默跳过。
-	if dirClient, dirOpts, ok := func() (*llm.Client, llm.Options, bool) {
+	if dirClient, dirOpts, ok := func() (llm.Provider, llm.Options, bool) {
 		if e.registry == nil {
 			return nil, llm.Options{}, false
 		}
@@ -417,7 +432,9 @@ func (e *GameEngine) PlayTurn(ctx context.Context, req TurnRequest) (*TurnRespon
 	if req.APIKey != "" {
 		baseURL := req.BaseURL
 		if baseURL == "" {
-			baseURL = e.llmClient.BaseURL()
+			if c, ok := e.llmClient.(*llm.Client); ok {
+				baseURL = c.BaseURL()
+			}
 		}
 		client = llm.NewClient(baseURL, req.APIKey, llmOpts.Model, e.llmTimeoutSec, e.llmMaxRetries)
 	}
@@ -536,67 +553,4 @@ func (e *GameEngine) PlayTurn(ctx context.Context, req TurnRequest) (*TurnRespon
 		TokenUsed:      llmResp.Usage.TotalTokens,
 		ScheduledInput: scheduledInput,
 	}, nil
-}
-
-// resolveSlot 解析指定 slot 的 LLM 客户端和采样参数。
-//
-// 优先级（委托给 provider.Registry.ResolveForSlot）：
-//  1. session slot X → 2. global slot X → 3. session * → 4. global * → 5. env 兜底
-func (e *GameEngine) resolveSlot(sessionID, accountID, slot string) (*llm.Client, llm.Options) {
-	if e.registry != nil {
-		if client, opts, ok := e.registry.ResolveForSlot(e.db, accountID, sessionID, slot); ok {
-			return client, opts
-		}
-	}
-	return e.llmClient, llm.Options{MaxTokens: e.maxTokens}
-}
-
-// applyGenParams 将 GenParams 中非 nil 的字段写入 llm.Options（就地修改）
-func applyGenParams(opts *llm.Options, p *GenParams) {
-	if p == nil {
-		return
-	}
-	if p.MaxTokens != nil {
-		opts.MaxTokens = *p.MaxTokens
-	}
-	if p.Temperature != nil {
-		opts.Temperature = p.Temperature
-	}
-	if p.TopP != nil {
-		opts.TopP = p.TopP
-	}
-	if p.TopK != nil {
-		opts.TopK = p.TopK
-	}
-	if p.FrequencyPenalty != nil {
-		opts.FrequencyPenalty = p.FrequencyPenalty
-	}
-	if p.PresencePenalty != nil {
-		opts.PresencePenalty = p.PresencePenalty
-	}
-	if p.ReasoningEffort != nil {
-		opts.ReasoningEffort = *p.ReasoningEffort
-	}
-	if len(p.Stop) > 0 {
-		opts.Stop = p.Stop
-	}
-}
-
-// triggerMemoryConsolidation 触发记忆摘要整合（异步，廉价模型）
-func (e *GameEngine) triggerMemoryConsolidation(sessionID string, recentHistory []map[string]string, floorCount int) {
-	ctx := context.Background()
-	prompt, err := e.memStore.BuildConsolidationPrompt(sessionID, recentHistory)
-	if err != nil {
-		return
-	}
-	resp, err := e.llmClient.Chat(ctx, []llm.Message{
-		{Role: "user", Content: prompt},
-	}, llm.Options{MaxTokens: e.memoryMaxTokens})
-	if err != nil {
-		return
-	}
-	_ = e.memStore.ParseConsolidationResult(sessionID, resp.Content, floorCount)
-
-	summary, _ := e.memStore.GetForInjection(sessionID, e.memoryTokenBudget, "")
-	_ = e.memStore.UpdateSessionSummaryCache(sessionID, summary)
 }

@@ -85,46 +85,16 @@ P-4G（Background Job Runtime，DB 持久化）的优先级需要提升，见下
 
 ---
 
-## 四、计划文档调整决策
+## 四、计划文档调整决策（已执行）
 
-### 4.1 P-WE-OVERVIEW.md 需要调整的内容
+> 以下调整已全部落实到 `P-WE-OVERVIEW.md`，此处仅保留决策记录。
 
-**调整 1：Phase 4 优先级排序明确化**
-
-当前 Phase 4 的条目没有内部优先级排序，评委的批评揭示了一个问题：P-4A（API Key 加密）和 P-4B（JWT）是**其他所有 Phase 4 工作的前置条件**，必须先完成。
-
-新的 Phase 4 执行顺序：
-```
-第一批（上线阻断，必须先完成）：
-  P-4A  API Key AES-256-GCM 加密
-  P-4B  JWT Auth
-
-第二批（平台工程，可并行）：
-  P-4C  多 Provider 原生适配
-  P-4D  OpenAPI 文档
-  P-4E  对话导入/导出
-  P-4G  Background Job Runtime（优先级提升，见下）
-
-第三批（体验增强）：
-  P-4F  双层记忆压缩
-  P-4H  Floor Run Phase SSE
-  P-4I  VN 渲染资产系统
-```
-
-**调整 2：P-4G 优先级提升**
-
-Background Job 不持久化是确定性的生产问题，不是低概率风险。P-4G 从"第三批"提升到"第二批"，与 P-4C/P-4D/P-4E 并行推进。
-
-**调整 3：P-3H（MCP）暂缓理由明确化**
-
-当前写的是"触发条件：创作者需要接入本地 MCP 工具时再做"，这太模糊。改为明确的不做理由：
-- WE 定位是游戏发布平台引擎，本地工具接入不在核心场景
-- Preset Tool（HTTP 回调）已覆盖云端集成
-- 等 GW 前端具备用户确认交互能力后重新评估
-
-**调整 4：Token 精度问题的触发条件明确化**
-
-在 P-WE-OVERVIEW.md 的技术债务表中，Token 计数精度问题补充触发条件：当需要支持 4K 以下上下文窗口的模型时，引入 provider-specific 分词器。
+- **调整 1**：Phase 4 优先级排序 → 已写入 P-WE-OVERVIEW Phase 4 章节（第一批/第二批/第三批）
+- **调整 2**：P-4G 优先级提升到第二批 → 已执行
+- **调整 3**：P-3H MCP 暂缓理由明确化 → 已重写为"不做的理由（明确）"三条
+- **调整 4**：Token 精度触发条件 → 候选项，当需要支持 4K 以下上下文窗口时引入 provider-specific 分词器
+- **新增**：P-4J（game_loop.go 拆分 / Pipeline Context 提取）→ 已写入 Phase 4 第三批
+- **新增**：P-4L（Preflight Rendering）从候选一行扩展为三阶段可执行计划 → 已写入 Phase 4 第三批
 
 ---
 

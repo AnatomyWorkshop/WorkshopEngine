@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -13,13 +12,14 @@ import (
 	"gorm.io/gorm"
 	dbmodels "mvu-backend/internal/core/db"
 	"mvu-backend/internal/core/llm"
+	"mvu-backend/internal/core/secrets"
 	"mvu-backend/internal/core/util"
 	"mvu-backend/internal/creation/card"
 	"mvu-backend/internal/platform/auth"
 )
 
 // RegisterCreationRoutes 注册创作工具接口（/api/create/...）
-func RegisterCreationRoutes(rg *gin.RouterGroup, db *gorm.DB) {
+func RegisterCreationRoutes(rg *gin.RouterGroup, db *gorm.DB, masterKey string) {
 	create := rg.Group("/create")
 
 	// ── 角色卡接口 ────────────────────────────────────────────
@@ -230,7 +230,7 @@ func RegisterCreationRoutes(rg *gin.RouterGroup, db *gorm.DB) {
 
 	// ── LLM 配置接口（复刻 TH /llm-profiles）────────────────
 
-	registerLLMProfileRoutes(create, db)
+	registerLLMProfileRoutes(create, db, masterKey)
 	registerPresetEntryRoutes(create, db)
 	registerRegexProfileRoutes(create, db)
 	registerMaterialRoutes(create, db)
@@ -239,7 +239,7 @@ func RegisterCreationRoutes(rg *gin.RouterGroup, db *gorm.DB) {
 }
 
 // registerLLMProfileRoutes 注册 LLM 配置 CRUD 路由（/api/create/llm-profiles/...）
-func registerLLMProfileRoutes(rg *gin.RouterGroup, db *gorm.DB) {
+func registerLLMProfileRoutes(rg *gin.RouterGroup, db *gorm.DB, masterKey string) {
 	lp := rg.Group("/llm-profiles")
 
 	// POST — 创建配置
@@ -260,15 +260,36 @@ func registerLLMProfileRoutes(rg *gin.RouterGroup, db *gorm.DB) {
 			body.Provider = "openai-compatible"
 		}
 		paramsJSON, _ := json.Marshal(body.Params)
+
+		// 加密 API Key（masterKey 为空时存明文兼容旧模式）
+		var apiKeyEnc string
+		if masterKey != "" {
+			enc, err := secrets.Encrypt(body.APIKey, masterKey)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "encrypt api key: " + err.Error()})
+				return
+			}
+			apiKeyEnc = enc
+		} else {
+			// 开发模式：写入旧 api_key 列
+		}
+
+		var legacyKey string
+		if masterKey == "" {
+			legacyKey = body.APIKey
+		}
+
 		profile := dbmodels.LLMProfile{
-			AccountID: auth.GetAccountID(c),
-			Name:      body.Name,
-			Provider:  body.Provider,
-			ModelID:   body.ModelID,
-			BaseURL:   body.BaseURL,
-			APIKey:    body.APIKey,
-			Params:    paramsJSON,
-			Status:    "active",
+			AccountID:       auth.GetAccountID(c),
+			Name:            body.Name,
+			Provider:        body.Provider,
+			ModelID:         body.ModelID,
+			BaseURL:         body.BaseURL,
+			APIKey:          legacyKey,
+			APIKeyEncrypted: apiKeyEnc,
+			APIKeyMasked:    secrets.Mask(body.APIKey),
+			Params:          paramsJSON,
+			Status:          "active",
 		}
 		if err := db.Create(&profile).Error; err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -325,7 +346,18 @@ func registerLLMProfileRoutes(rg *gin.RouterGroup, db *gorm.DB) {
 			updates["base_url"] = body.BaseURL
 		}
 		if body.APIKey != "" {
-			updates["api_key"] = body.APIKey
+			if masterKey != "" {
+				enc, err := secrets.Encrypt(body.APIKey, masterKey)
+				if err != nil {
+					c.JSON(http.StatusInternalServerError, gin.H{"error": "encrypt api key: " + err.Error()})
+					return
+				}
+				updates["api_key_encrypted"] = enc
+				updates["api_key"] = ""
+			} else {
+				updates["api_key"] = body.APIKey
+			}
+			updates["api_key_masked"] = secrets.Mask(body.APIKey)
 		}
 		if body.Status == "active" || body.Status == "disabled" {
 			updates["status"] = body.Status
@@ -454,11 +486,14 @@ func registerLLMProfileRoutes(rg *gin.RouterGroup, db *gorm.DB) {
 
 // toProfileResp 将 LLMProfile 转为对外响应（隐藏明文 APIKey，只返回掩码）
 func toProfileResp(p dbmodels.LLMProfile) gin.H {
-	// 将 Params JSONB 反序列化为 map，方便前端读取
 	var params map[string]any
 	_ = json.Unmarshal(p.Params, &params)
 	if params == nil {
 		params = map[string]any{}
+	}
+	masked := p.APIKeyMasked
+	if masked == "" && p.APIKey != "" {
+		masked = secrets.Mask(p.APIKey) // 旧数据兼容
 	}
 	return gin.H{
 		"id":             p.ID,
@@ -467,21 +502,13 @@ func toProfileResp(p dbmodels.LLMProfile) gin.H {
 		"provider":       p.Provider,
 		"model_id":       p.ModelID,
 		"base_url":       p.BaseURL,
-		"api_key_masked": maskAPIKey(p.APIKey),
+		"api_key_masked": masked,
 		"params":         params,
 		"status":         p.Status,
 		"is_global":      p.IsGlobal,
 		"created_at":     p.CreatedAt,
 		"updated_at":     p.UpdatedAt,
 	}
-}
-
-// maskAPIKey 返回 API Key 的掩码（保留后 4 位）
-func maskAPIKey(key string) string {
-	if len(key) <= 8 {
-		return "****"
-	}
-	return strings.Repeat("*", len(key)-4) + key[len(key)-4:]
 }
 
 // ── registerPresetEntryRoutes ─────────────────────────────────────────────────

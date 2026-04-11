@@ -97,18 +97,20 @@ type PresetEntry struct {
 // 与 TH llm-profiles 的 generation_params 字段完全对齐。
 // Binding 上的 Params 具有更高优先级，可逐字段覆盖。
 type LLMProfile struct {
-	ID        string         `gorm:"primaryKey;type:uuid;default:gen_random_uuid()" json:"id"`
-	AccountID string         `gorm:"not null;index"                                  json:"account_id"` // 关联账户/用户
-	Name      string         `gorm:"not null"                                        json:"name"`       // 配置名称（如 "我的 GPT-4"）
-	Provider  string         `gorm:"default:'openai-compatible'"                     json:"provider"`   // openai | anthropic | openai-compatible
-	ModelID   string         `gorm:"not null"                                        json:"model_id"`   // 模型 ID（如 "gpt-4o-mini"）
-	BaseURL   string         `json:"base_url"`                                                          // 可选，覆盖默认 API 地址
-	APIKey    string         `gorm:"not null"                                        json:"-"`          // 明文 Key（生产应加密，此处简化）
-	Params    datatypes.JSON `gorm:"type:jsonb;default:'{}'"                         json:"params"`     // 采样参数覆盖（见 GenParams）
-	Status    string         `gorm:"default:'active'"                                json:"status"`     // active | disabled
-	IsGlobal  bool           `gorm:"default:false"                                   json:"is_global"`  // 是否为全局活跃配置
-	CreatedAt time.Time      `json:"created_at"`
-	UpdatedAt time.Time      `json:"updated_at"`
+	ID              string         `gorm:"primaryKey;type:uuid;default:gen_random_uuid()" json:"id"`
+	AccountID       string         `gorm:"not null;index"                                  json:"account_id"`
+	Name            string         `gorm:"not null"                                        json:"name"`
+	Provider        string         `gorm:"default:'openai-compatible'"                     json:"provider"`
+	ModelID         string         `gorm:"not null"                                        json:"model_id"`
+	BaseURL         string         `json:"base_url"`
+	APIKey          string         `gorm:"column:api_key"                                  json:"-"`              // 旧明文列（兼容迁移，新数据不写入）
+	APIKeyEncrypted string         `gorm:"column:api_key_encrypted"                        json:"-"`              // AES-256-GCM 密文（v1:salt:iv:payload）
+	APIKeyMasked    string         `gorm:"column:api_key_masked"                           json:"api_key_masked"` // 掩码（****XXXX）
+	Params          datatypes.JSON `gorm:"type:jsonb;default:'{}'"                         json:"params"`
+	Status          string         `gorm:"default:'active'"                                json:"status"`
+	IsGlobal        bool           `gorm:"default:false"                                   json:"is_global"`
+	CreatedAt       time.Time      `json:"created_at"`
+	UpdatedAt       time.Time      `json:"updated_at"`
 }
 
 // LLMProfileBinding 将 LLMProfile 绑定到 global 或特定 session 的 instance slot。

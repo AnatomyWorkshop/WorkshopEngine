@@ -1,0 +1,3377 @@
+basePath: /api
+definitions:
+  internal_engine_api.CreateMemoryReq:
+    properties:
+      content:
+        type: string
+      importance:
+        description: 0–1，默认 0.9
+        type: number
+      stage_tags:
+        description: 阶段标签（空 = 无阶段限制）
+        items:
+          type: string
+        type: array
+      type:
+        description: fact | summary | open_loop，默认 fact
+        type: string
+    required:
+    - content
+    type: object
+  internal_engine_api.ForkSessionReq:
+    properties:
+      from_floor_seq:
+        description: |-
+          复制到哪个楼层序号（含）。
+          nil = 复制全部已提交楼层；0 = 不复制任何楼层（空历史分叉，相当于同模板新会话）。
+        type: integer
+      user_id:
+        description: 可选：覆盖新 session 的用户 ID
+        type: string
+    type: object
+  internal_engine_api.GenParams:
+    properties:
+      frequency_penalty:
+        type: number
+      max_tokens:
+        type: integer
+      presence_penalty:
+        type: number
+      reasoning_effort:
+        description: '"low"|"medium"|"high"'
+        type: string
+      stop:
+        items:
+          type: string
+        type: array
+      temperature:
+        type: number
+      top_k:
+        type: integer
+      top_p:
+        type: number
+    type: object
+  internal_engine_api.ThchatBranch:
+    properties:
+      branch_id:
+        type: string
+      id:
+        type: string
+      origin_seq:
+        type: integer
+      parent_branch:
+        type: string
+    type: object
+  internal_engine_api.ThchatEdge:
+    properties:
+      from_id:
+        type: string
+      id:
+        type: string
+      relation:
+        type: string
+      to_id:
+        type: string
+    type: object
+  internal_engine_api.ThchatExport:
+    properties:
+      branches:
+        items:
+          $ref: '#/definitions/internal_engine_api.ThchatBranch'
+        type: array
+      exported_at:
+        type: string
+      floors:
+        items:
+          $ref: '#/definitions/internal_engine_api.ThchatFloor'
+        type: array
+      format:
+        type: string
+      game_id:
+        type: string
+      game_title:
+        type: string
+      memories:
+        items:
+          $ref: '#/definitions/internal_engine_api.ThchatMemory'
+        type: array
+      memory_edges:
+        items:
+          $ref: '#/definitions/internal_engine_api.ThchatEdge'
+        type: array
+      session:
+        $ref: '#/definitions/internal_engine_api.ThchatSession'
+      version:
+        type: string
+    type: object
+  internal_engine_api.ThchatFloor:
+    properties:
+      branch_id:
+        type: string
+      id:
+        type: string
+      pages:
+        items:
+          $ref: '#/definitions/internal_engine_api.ThchatPage'
+        type: array
+      seq:
+        type: integer
+      status:
+        type: string
+    type: object
+  internal_engine_api.ThchatMemory:
+    properties:
+      content:
+        type: string
+      deprecated:
+        type: boolean
+      fact_key:
+        type: string
+      id:
+        type: string
+      importance:
+        type: number
+      source_floor:
+        type: integer
+      stage_tags:
+        items:
+          type: integer
+        type: array
+      type:
+        type: string
+    type: object
+  internal_engine_api.ThchatPage:
+    properties:
+      id:
+        type: string
+      is_active:
+        type: boolean
+      messages:
+        items:
+          type: integer
+        type: array
+      page_vars:
+        items:
+          type: integer
+        type: array
+      token_used:
+        type: integer
+    type: object
+  internal_engine_api.ThchatSession:
+    properties:
+      character_card_id:
+        type: string
+      character_snapshot:
+        items:
+          type: integer
+        type: array
+      created_at:
+        type: string
+      floor_count:
+        type: integer
+      id:
+        type: string
+      memory_summary:
+        type: string
+      status:
+        type: string
+      title:
+        type: string
+      updated_at:
+        type: string
+      variables:
+        items:
+          type: integer
+        type: array
+    type: object
+  internal_engine_api.TurnRequest:
+    properties:
+      api_key:
+        description: 可选：用户自定义 AI 配置（覆盖服务器默认 Key）
+        type: string
+      base_url:
+        type: string
+      branch_id:
+        description: 可选：分支 ID（空 = "main"，P-3G）
+        type: string
+      generation_params:
+        allOf:
+        - $ref: '#/definitions/internal_engine_api.GenParams'
+        description: |-
+          可选：本轮生成参数覆盖（最高优先级，覆盖 profile 和 env 配置）
+          对齐 TH TurnRequest.generation_params 字段
+      is_regen:
+        description: 重新生成（Swipe）
+        type: boolean
+      model:
+        type: string
+      session_id:
+        type: string
+      user_input:
+        type: string
+    type: object
+  internal_engine_api.UpdateSessionReq:
+    properties:
+      is_public:
+        description: 指针类型：nil = 不修改，false/true = 明确设置
+        type: boolean
+      status:
+        description: active | archived
+        type: string
+      title:
+        type: string
+    type: object
+host: localhost:8080
+info:
+  contact: {}
+  description: AI 文字游戏引擎 — 游玩、创作、社交全栈 API
+  title: WorkshopEngine API
+  version: "1.0"
+paths:
+  /assets/{slug}/upload:
+    post:
+      consumes:
+      - multipart/form-data
+      description: 上传图片/音频文件到指定游戏 slug 目录（最大 10MB）
+      parameters:
+      - description: 游戏 slug
+        in: path
+        name: slug
+        required: true
+        type: string
+      - description: 素材文件（png/jpg/gif/webp/mp3/ogg/wav）
+        in: formData
+        name: file
+        required: true
+        type: file
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: url + filename + size + mime
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties: true
+            type: object
+        "415":
+          description: 不支持的文件类型
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 上传素材文件
+      tags:
+      - assets
+  /auth/token:
+    post:
+      consumes:
+      - application/json
+      description: 使用 admin_key 验证后签发 JWT Bearer token
+      parameters:
+      - description: 签发请求
+        in: body
+        name: body
+        required: true
+        schema:
+          properties:
+            account_id:
+              type: string
+            admin_key:
+              type: string
+          type: object
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: token + expires_in_hours
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties: true
+            type: object
+        "401":
+          description: Unauthorized
+          schema:
+            additionalProperties: true
+            type: object
+      summary: 签发 JWT Token
+      tags:
+      - auth
+  /create/cards:
+    get:
+      description: 获取公开角色卡列表
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 角色卡列表
+      tags:
+      - creation-cards
+  /create/cards/{slug}:
+    delete:
+      description: 根据 slug 删除角色卡
+      parameters:
+      - description: 角色卡 slug
+        in: path
+        name: slug
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 删除角色卡
+      tags:
+      - creation-cards
+    get:
+      description: 根据 slug 获取角色卡详情
+      parameters:
+      - description: 角色卡 slug
+        in: path
+        name: slug
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "404":
+          description: Not Found
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 角色卡详情
+      tags:
+      - creation-cards
+    patch:
+      consumes:
+      - application/json
+      description: 部分更新角色卡字段
+      parameters:
+      - description: 角色卡 slug
+        in: path
+        name: slug
+        required: true
+        type: string
+      - description: 更新字段
+        in: body
+        name: body
+        required: true
+        schema:
+          additionalProperties: true
+          type: object
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 更新角色卡字段
+      tags:
+      - creation-cards
+  /create/cards/import:
+    post:
+      consumes:
+      - multipart/form-data
+      description: 上传角色卡 PNG 文件，解析内嵌数据并导入
+      parameters:
+      - description: 角色卡 PNG 文件
+        in: formData
+        name: file
+        required: true
+        type: file
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties: true
+            type: object
+        "422":
+          description: Unprocessable Entity
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 导入角色卡 PNG
+      tags:
+      - creation-cards
+  /create/games/{id}/comment-config:
+    get:
+      description: 获取游戏的评论区配置（default_mode 等）
+      parameters:
+      - description: 游戏 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 获取评论配置
+      tags:
+      - social-comments
+    patch:
+      consumes:
+      - application/json
+      description: 更新游戏的评论区配置
+      parameters:
+      - description: 游戏 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: 配置
+        in: body
+        name: body
+        required: true
+        schema:
+          properties:
+            default_mode:
+              type: string
+          type: object
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 更新评论配置
+      tags:
+      - social-comments
+  /create/llm-profiles:
+    get:
+      description: 列出当前账户的 LLM 配置
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: LLM 配置列表
+      tags:
+      - creation-llm
+    post:
+      consumes:
+      - application/json
+      description: 创建新的 LLM 配置（含加密 API Key）
+      parameters:
+      - description: name, provider, model_id, base_url, api_key, params
+        in: body
+        name: body
+        required: true
+        schema:
+          additionalProperties: true
+          type: object
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 创建 LLM 配置
+      tags:
+      - creation-llm
+  /create/llm-profiles/{id}:
+    delete:
+      description: 将 LLM 配置标记为 deleted
+      parameters:
+      - description: 配置 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 软删除 LLM 配置
+      tags:
+      - creation-llm
+    get:
+      description: 根据 ID 获取 LLM 配置详情
+      parameters:
+      - description: 配置 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "404":
+          description: Not Found
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 获取单个 LLM 配置
+      tags:
+      - creation-llm
+    patch:
+      consumes:
+      - application/json
+      description: 部分更新 LLM 配置字段
+      parameters:
+      - description: 配置 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: 更新字段
+        in: body
+        name: body
+        required: true
+        schema:
+          additionalProperties: true
+          type: object
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 更新 LLM 配置
+      tags:
+      - creation-llm
+  /create/llm-profiles/{id}/activate:
+    post:
+      consumes:
+      - application/json
+      description: 将 LLM 配置绑定到指定 scope/slot
+      parameters:
+      - description: 配置 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: scope, scope_id, slot, params
+        in: body
+        name: body
+        required: true
+        schema:
+          additionalProperties: true
+          type: object
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "404":
+          description: Not Found
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 绑定配置到作用域
+      tags:
+      - creation-llm
+  /create/llm-profiles/models/discover:
+    post:
+      consumes:
+      - application/json
+      description: 拉取指定 Provider 的可用模型列表
+      parameters:
+      - description: base_url, api_key
+        in: body
+        name: body
+        required: true
+        schema:
+          additionalProperties: true
+          type: object
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "502":
+          description: Bad Gateway
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 发现可用模型
+      tags:
+      - creation-llm
+  /create/llm-profiles/models/test:
+    post:
+      consumes:
+      - application/json
+      description: 向指定 Provider 发送探测消息，返回时延和响应片段
+      parameters:
+      - description: base_url, api_key, model
+        in: body
+        name: body
+        required: true
+        schema:
+          additionalProperties: true
+          type: object
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "502":
+          description: Bad Gateway
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 测试 LLM 连接
+      tags:
+      - creation-llm
+  /create/regex-profiles/{pid}/rules:
+    get:
+      description: 列出配置下的正则规则
+      parameters:
+      - description: 配置 ID
+        in: path
+        name: pid
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 正则规则列表
+      tags:
+      - creation-regex
+    post:
+      consumes:
+      - application/json
+      description: 新建正则替换规则
+      parameters:
+      - description: 配置 ID
+        in: path
+        name: pid
+        required: true
+        type: string
+      - description: pattern, replacement, apply_to, order, enabled
+        in: body
+        name: body
+        required: true
+        schema:
+          additionalProperties: true
+          type: object
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 创建正则规则
+      tags:
+      - creation-regex
+  /create/regex-profiles/{pid}/rules/{rid}:
+    delete:
+      description: 删除指定正则规则
+      parameters:
+      - description: 配置 ID
+        in: path
+        name: pid
+        required: true
+        type: string
+      - description: 规则 ID
+        in: path
+        name: rid
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 删除正则规则
+      tags:
+      - creation-regex
+    patch:
+      consumes:
+      - application/json
+      description: 部分更新正则规则
+      parameters:
+      - description: 配置 ID
+        in: path
+        name: pid
+        required: true
+        type: string
+      - description: 规则 ID
+        in: path
+        name: rid
+        required: true
+        type: string
+      - description: 更新字段
+        in: body
+        name: body
+        required: true
+        schema:
+          additionalProperties: true
+          type: object
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 更新正则规则
+      tags:
+      - creation-regex
+  /create/regex-profiles/{pid}/rules/reorder:
+    put:
+      consumes:
+      - application/json
+      description: 批量更新规则 order
+      parameters:
+      - description: 配置 ID
+        in: path
+        name: pid
+        required: true
+        type: string
+      - description: '[{id, order}]'
+        in: body
+        name: body
+        required: true
+        schema:
+          items:
+            additionalProperties: true
+            type: object
+          type: array
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 批量调整规则顺序
+      tags:
+      - creation-regex
+  /create/templates:
+    get:
+      description: 获取游戏模板列表
+      parameters:
+      - default: published
+        description: '过滤状态: published|all'
+        in: query
+        name: status
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 模板列表
+      tags:
+      - creation-templates
+    post:
+      consumes:
+      - application/json
+      description: 创建新游戏模板
+      parameters:
+      - description: GameTemplate
+        in: body
+        name: body
+        required: true
+        schema:
+          additionalProperties: true
+          type: object
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 创建模板
+      tags:
+      - creation-templates
+  /create/templates/{id}:
+    delete:
+      description: 删除游戏模板
+      parameters:
+      - description: 模板 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 删除模板
+      tags:
+      - creation-templates
+    patch:
+      consumes:
+      - application/json
+      description: 部分更新游戏模板字段
+      parameters:
+      - description: 模板 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: 更新字段
+        in: body
+        name: body
+        required: true
+        schema:
+          additionalProperties: true
+          type: object
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 更新模板
+      tags:
+      - creation-templates
+  /create/templates/{id}/export:
+    get:
+      description: 打包导出游戏模板及所有关联数据
+      parameters:
+      - description: 游戏模板 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 导出游戏包
+      tags:
+      - creation-import-export
+  /create/templates/{id}/lorebook:
+    get:
+      description: 获取指定游戏的世界书词条
+      parameters:
+      - description: 游戏模板 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 世界书词条列表
+      tags:
+      - creation-lorebook
+    post:
+      consumes:
+      - application/json
+      description: 创建或更新世界书词条
+      parameters:
+      - description: 游戏模板 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: WorldbookEntry
+        in: body
+        name: body
+        required: true
+        schema:
+          additionalProperties: true
+          type: object
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 新增/更新世界书词条
+      tags:
+      - creation-lorebook
+  /create/templates/{id}/lorebook/{eid}:
+    delete:
+      description: 删除指定世界书词条
+      parameters:
+      - description: 游戏模板 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: 词条 ID
+        in: path
+        name: eid
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 删除世界书词条
+      tags:
+      - creation-lorebook
+  /create/templates/{id}/lorebook/import-st:
+    post:
+      consumes:
+      - application/json
+      description: 导入 SillyTavern 世界书 JSON，批量写入 WorldbookEntry
+      parameters:
+      - description: 游戏模板 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: ST worldbook JSON
+        in: body
+        name: body
+        required: true
+        schema:
+          additionalProperties: true
+          type: object
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 导入 ST 世界书
+      tags:
+      - creation-import-export
+  /create/templates/{id}/materials:
+    get:
+      description: 列出游戏素材（支持多维度过滤）
+      parameters:
+      - description: 游戏模板 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: 素材类型
+        in: query
+        name: type
+        type: string
+      - description: 情绪
+        in: query
+        name: mood
+        type: string
+      - description: 风格
+        in: query
+        name: style
+        type: string
+      - description: 功能标签
+        in: query
+        name: function_tag
+        type: string
+      - description: '启用状态: true|false'
+        in: query
+        name: enabled
+        type: string
+      - default: 50
+        description: 分页大小
+        in: query
+        name: limit
+        type: integer
+      - default: 0
+        description: 偏移量
+        in: query
+        name: offset
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 素材列表
+      tags:
+      - creation-materials
+    post:
+      consumes:
+      - application/json
+      description: 新建素材条目
+      parameters:
+      - description: 游戏模板 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Material
+        in: body
+        name: body
+        required: true
+        schema:
+          additionalProperties: true
+          type: object
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 创建素材
+      tags:
+      - creation-materials
+  /create/templates/{id}/materials/{mid}:
+    delete:
+      description: 删除指定素材
+      parameters:
+      - description: 游戏模板 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: 素材 ID
+        in: path
+        name: mid
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 删除素材
+      tags:
+      - creation-materials
+    patch:
+      consumes:
+      - application/json
+      description: 部分更新素材字段
+      parameters:
+      - description: 游戏模板 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: 素材 ID
+        in: path
+        name: mid
+        required: true
+        type: string
+      - description: 更新字段
+        in: body
+        name: body
+        required: true
+        schema:
+          additionalProperties: true
+          type: object
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 更新素材
+      tags:
+      - creation-materials
+  /create/templates/{id}/materials/batch:
+    post:
+      consumes:
+      - application/json
+      description: 批量创建素材条目
+      parameters:
+      - description: 游戏模板 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Material 数组
+        in: body
+        name: body
+        required: true
+        schema:
+          items:
+            additionalProperties: true
+            type: object
+          type: array
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 批量导入素材
+      tags:
+      - creation-materials
+  /create/templates/{id}/preset-entries:
+    get:
+      description: 列出游戏的预设条目（按 injection_order 升序）
+      parameters:
+      - description: 游戏模板 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: '过滤: true|false'
+        in: query
+        name: enabled
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 预设条目列表
+      tags:
+      - creation-preset
+    post:
+      consumes:
+      - application/json
+      description: 新建一条预设条目
+      parameters:
+      - description: 游戏模板 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: PresetEntry
+        in: body
+        name: body
+        required: true
+        schema:
+          additionalProperties: true
+          type: object
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 创建预设条目
+      tags:
+      - creation-preset
+  /create/templates/{id}/preset-entries/{eid}:
+    delete:
+      description: 删除指定预设条目
+      parameters:
+      - description: 游戏模板 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: 条目 identifier
+        in: path
+        name: eid
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 删除预设条目
+      tags:
+      - creation-preset
+    patch:
+      consumes:
+      - application/json
+      description: 部分更新预设条目
+      parameters:
+      - description: 游戏模板 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: 条目 identifier
+        in: path
+        name: eid
+        required: true
+        type: string
+      - description: 更新字段
+        in: body
+        name: body
+        required: true
+        schema:
+          additionalProperties: true
+          type: object
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 更新预设条目
+      tags:
+      - creation-preset
+  /create/templates/{id}/preset-entries/reorder:
+    put:
+      consumes:
+      - application/json
+      description: 批量更新 injection_order
+      parameters:
+      - description: 游戏模板 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: '[{identifier, injection_order}]'
+        in: body
+        name: body
+        required: true
+        schema:
+          items:
+            additionalProperties: true
+            type: object
+          type: array
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 批量调整条目顺序
+      tags:
+      - creation-preset
+  /create/templates/{id}/preset/import-st:
+    post:
+      consumes:
+      - application/json
+      description: 导入 SillyTavern 预设 JSON，批量写入 PresetEntry
+      parameters:
+      - description: 游戏模板 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: ST preset JSON
+        in: body
+        name: body
+        required: true
+        schema:
+          additionalProperties: true
+          type: object
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 导入 ST 预设
+      tags:
+      - creation-import-export
+  /create/templates/{id}/regex-profiles:
+    get:
+      description: 列出游戏的正则替换配置
+      parameters:
+      - description: 游戏模板 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 正则配置列表
+      tags:
+      - creation-regex
+    post:
+      consumes:
+      - application/json
+      description: 新建正则替换配置
+      parameters:
+      - description: 游戏模板 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: name, enabled
+        in: body
+        name: body
+        required: true
+        schema:
+          additionalProperties: true
+          type: object
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 创建正则配置
+      tags:
+      - creation-regex
+  /create/templates/{id}/regex-profiles/{pid}:
+    delete:
+      description: 删除正则配置及其所有规则
+      parameters:
+      - description: 游戏模板 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: 配置 ID
+        in: path
+        name: pid
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 删除正则配置
+      tags:
+      - creation-regex
+    patch:
+      consumes:
+      - application/json
+      description: 部分更新正则配置
+      parameters:
+      - description: 游戏模板 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: 配置 ID
+        in: path
+        name: pid
+        required: true
+        type: string
+      - description: 更新字段
+        in: body
+        name: body
+        required: true
+        schema:
+          additionalProperties: true
+          type: object
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 更新正则配置
+      tags:
+      - creation-regex
+  /create/templates/{id}/tools:
+    get:
+      description: 列出游戏的预设工具
+      parameters:
+      - description: 游戏模板 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 预设工具列表
+      tags:
+      - creation-tools
+    post:
+      consumes:
+      - application/json
+      description: 新建一个预设工具
+      parameters:
+      - description: 游戏模板 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: PresetTool
+        in: body
+        name: body
+        required: true
+        schema:
+          additionalProperties: true
+          type: object
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 创建预设工具
+      tags:
+      - creation-tools
+  /create/templates/{id}/tools/{tid}:
+    delete:
+      description: 删除指定预设工具
+      parameters:
+      - description: 游戏模板 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: 工具 ID
+        in: path
+        name: tid
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 删除预设工具
+      tags:
+      - creation-tools
+    patch:
+      consumes:
+      - application/json
+      description: 部分更新预设工具
+      parameters:
+      - description: 游戏模板 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: 工具 ID
+        in: path
+        name: tid
+        required: true
+        type: string
+      - description: 更新字段
+        in: body
+        name: body
+        required: true
+        schema:
+          additionalProperties: true
+          type: object
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 更新预设工具
+      tags:
+      - creation-tools
+  /create/templates/import:
+    post:
+      consumes:
+      - application/json
+      description: 解包导入游戏，重建所有关联数据
+      parameters:
+      - description: 导出的游戏包 JSON
+        in: body
+        name: body
+        required: true
+        schema:
+          additionalProperties: true
+          type: object
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 导入游戏包
+      tags:
+      - creation-import-export
+  /health:
+    get:
+      description: 返回服务运行状态
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      summary: 健康检查
+      tags:
+      - system
+  /play/games:
+    get:
+      description: 分页查询已发布游戏（支持标签/类型/排序）
+      parameters:
+      - description: 逗号分隔标签过滤
+        in: query
+        name: tags
+        type: string
+      - description: 游戏类型
+        in: query
+        name: type
+        type: string
+      - description: 排序：new（默认）| hot
+        in: query
+        name: sort
+        type: string
+      - default: 20
+        description: 每页数量
+        in: query
+        name: limit
+        type: integer
+      - description: 偏移量
+        in: query
+        name: offset
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 游戏列表
+      tags:
+      - play-discovery
+  /play/games/{slug}:
+    get:
+      description: 按 slug 或 UUID 查询已发布游戏详情（含 comment_config）
+      parameters:
+      - description: 游戏 slug 或 UUID
+        in: path
+        name: slug
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "404":
+          description: Not Found
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 游戏详情
+      tags:
+      - play-discovery
+  /play/games/worldbook/{id}:
+    get:
+      description: 查看已发布游戏的世界书词条（需游戏开启 allow_player_worldbook_view）
+      parameters:
+      - description: 游戏 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "403":
+          description: Forbidden
+          schema:
+            additionalProperties: true
+            type: object
+        "404":
+          description: Not Found
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 玩家世界书
+      tags:
+      - play-discovery
+  /play/sessions:
+    get:
+      description: 列出玩家会话（支持 game_id/user_id 过滤）
+      parameters:
+      - description: 按游戏过滤
+        in: query
+        name: game_id
+        type: string
+      - description: 按用户过滤
+        in: query
+        name: user_id
+        type: string
+      - default: 20
+        description: 每页数量
+        in: query
+        name: limit
+        type: integer
+      - description: 偏移量
+        in: query
+        name: offset
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 会话列表
+      tags:
+      - play-discovery
+    post:
+      consumes:
+      - application/json
+      description: 为指定游戏创建新会话（自动注入 first_mes，递增 play_count）
+      parameters:
+      - description: 创建请求
+        in: body
+        name: body
+        required: true
+        schema:
+          properties:
+            game_id:
+              type: string
+            user_id:
+              type: string
+          type: object
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: session_id
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 创建会话
+      tags:
+      - play-discovery
+  /play/sessions/{id}:
+    delete:
+      description: 删除会话及所有关联的楼层、页面和记忆
+      parameters:
+      - description: 会话 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 删除会话
+      tags:
+      - play-engine
+    patch:
+      consumes:
+      - application/json
+      description: 修改会话标题、状态或公开标志
+      parameters:
+      - description: 会话 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: 更新字段
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/internal_engine_api.UpdateSessionReq'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 更新会话信息
+      tags:
+      - play-engine
+  /play/sessions/{id}/branches:
+    get:
+      description: 列出会话所有分支（含 main）
+      parameters:
+      - description: 会话 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 列出会话分支
+      tags:
+      - play-engine
+  /play/sessions/{id}/branches/{bid}:
+    delete:
+      description: 删除指定分支（不能删除 main 分支）
+      parameters:
+      - description: 会话 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: 分支 ID
+        in: path
+        name: bid
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 删除分支
+      tags:
+      - play-engine
+  /play/sessions/{id}/export:
+    get:
+      description: 导出会话为 .thchat（WE 原生，无损）或 .jsonl（ST 兼容，有损）格式
+      parameters:
+      - description: 会话 ID
+        in: path
+        name: id
+        type: string
+      - description: 导出格式：thchat（默认）| jsonl
+        in: query
+        name: format
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/internal_engine_api.ThchatExport'
+        "404":
+          description: Not Found
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 导出会话
+      tags:
+      - play-engine
+  /play/sessions/{id}/floors:
+    get:
+      description: 列出会话所有楼层（含激活页摘要），支持 from/to 范围过滤
+      parameters:
+      - description: 会话 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: 起始楼层序号
+        in: query
+        name: from
+        type: integer
+      - description: 结束楼层序号
+        in: query
+        name: to
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 楼层列表
+      tags:
+      - play-engine
+  /play/sessions/{id}/floors/{fid}/branch:
+    post:
+      description: 从指定楼层创建新分支
+      parameters:
+      - description: 会话 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: 楼层 ID
+        in: path
+        name: fid
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 从楼层创建分支
+      tags:
+      - play-engine
+  /play/sessions/{id}/floors/{fid}/pages:
+    get:
+      description: 列出指定楼层的所有 Swipe 页
+      parameters:
+      - description: 会话 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: 楼层 ID
+        in: path
+        name: fid
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: Swipe 页列表
+      tags:
+      - play-engine
+  /play/sessions/{id}/floors/{fid}/pages/{pid}/activate:
+    patch:
+      description: 将指定页设为楼层的激活页
+      parameters:
+      - description: 会话 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: 楼层 ID
+        in: path
+        name: fid
+        required: true
+        type: string
+      - description: 页 ID
+        in: path
+        name: pid
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 激活 Swipe 页
+      tags:
+      - play-engine
+  /play/sessions/{id}/floors/{fid}/snapshot:
+    get:
+      description: 返回 Verifier 结果和命中词条
+      parameters:
+      - description: 会话 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: 楼层 ID
+        in: path
+        name: fid
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "404":
+          description: Not Found
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 楼层 Prompt 快照
+      tags:
+      - play-engine
+  /play/sessions/{id}/fork:
+    post:
+      consumes:
+      - application/json
+      description: 从指定楼层分叉出新会话（平行时间线/存档点）
+      parameters:
+      - description: 会话 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: 分叉参数
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/internal_engine_api.ForkSessionReq'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 分叉会话
+      tags:
+      - play-engine
+  /play/sessions/{id}/memories:
+    get:
+      description: 返回会话所有记忆条目
+      parameters:
+      - description: 会话 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 列出记忆条目
+      tags:
+      - play-engine
+    post:
+      consumes:
+      - application/json
+      description: 手动创建记忆条目（创作者/调试用）
+      parameters:
+      - description: 会话 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: 记忆内容
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/internal_engine_api.CreateMemoryReq'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 创建记忆
+      tags:
+      - play-engine
+  /play/sessions/{id}/memories/{mid}:
+    delete:
+      description: 删除记忆条目（?hard=true 物理删除，否则软删除）
+      parameters:
+      - description: 会话 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: 记忆 ID
+        in: path
+        name: mid
+        required: true
+        type: string
+      - description: 是否物理删除
+        in: query
+        name: hard
+        type: boolean
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 删除记忆
+      tags:
+      - play-engine
+    patch:
+      consumes:
+      - application/json
+      description: 更新记忆的 content/importance/type 等字段
+      parameters:
+      - description: 会话 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: 记忆 ID
+        in: path
+        name: mid
+        required: true
+        type: string
+      - description: 要更新的字段
+        in: body
+        name: body
+        required: true
+        schema:
+          additionalProperties: true
+          type: object
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 更新记忆字段
+      tags:
+      - play-engine
+  /play/sessions/{id}/memories/{mid}/edges:
+    get:
+      description: 列出指定记忆的所有双向关系边
+      parameters:
+      - description: 会话 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: 记忆 ID
+        in: path
+        name: mid
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 列出单条记忆的关系边
+      tags:
+      - play-engine
+  /play/sessions/{id}/memories/consolidate:
+    post:
+      description: 立即同步触发记忆整合（调试用）
+      parameters:
+      - description: 会话 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 触发记忆整合
+      tags:
+      - play-engine
+  /play/sessions/{id}/memory-edges:
+    get:
+      description: 列出会话所有记忆关系边，支持按 relation 过滤
+      parameters:
+      - description: 会话 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: 关系类型过滤（updates|contradicts|supports|resolves）
+        in: query
+        name: relation
+        type: string
+      - description: 返回条数（默认 50）
+        in: query
+        name: limit
+        type: integer
+      - description: 偏移量
+        in: query
+        name: offset
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 列出记忆关系边
+      tags:
+      - play-engine
+    post:
+      consumes:
+      - application/json
+      description: 手动创建记忆间的关系边（创作者调试用）
+      parameters:
+      - description: 会话 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: 关系边（from_id, to_id, relation）
+        in: body
+        name: body
+        required: true
+        schema:
+          type: object
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 创建记忆关系边
+      tags:
+      - play-engine
+  /play/sessions/{id}/memory-edges/{eid}:
+    delete:
+      description: 删除指定的记忆关系边
+      parameters:
+      - description: 会话 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: 边 ID
+        in: path
+        name: eid
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 删除关系边
+      tags:
+      - play-engine
+    patch:
+      consumes:
+      - application/json
+      description: 修改关系边的 relation 类型
+      parameters:
+      - description: 会话 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: 边 ID
+        in: path
+        name: eid
+        required: true
+        type: string
+      - description: 新 relation
+        in: body
+        name: body
+        required: true
+        schema:
+          type: object
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 更新关系边
+      tags:
+      - play-engine
+  /play/sessions/{id}/prompt-preview:
+    get:
+      description: Prompt dry-run，不调用 LLM，供创作者调试
+      parameters:
+      - description: 会话 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: 用户输入
+        in: query
+        name: input
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: Prompt 预览
+      tags:
+      - play-engine
+  /play/sessions/{id}/regen:
+    post:
+      consumes:
+      - application/json
+      description: 以 isRegen=true 重新生成最后一回合（Swipe）
+      parameters:
+      - description: 会话 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: 回合请求
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/internal_engine_api.TurnRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "409":
+          description: Conflict
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 重新生成上一回合
+      tags:
+      - play-engine
+  /play/sessions/{id}/state:
+    get:
+      description: 返回会话当前完整状态（变量、楼层摘要等）
+      parameters:
+      - description: 会话 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "404":
+          description: Not Found
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 获取会话状态快照
+      tags:
+      - play-engine
+  /play/sessions/{id}/stream:
+    get:
+      description: 通过 Server-Sent Events 流式返回 AI 生成内容
+      parameters:
+      - description: 会话 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: 用户输入
+        in: query
+        name: input
+        required: true
+        type: string
+      - description: 自定义 API Key
+        in: query
+        name: api_key
+        type: string
+      - description: 自定义 Base URL
+        in: query
+        name: base_url
+        type: string
+      - description: 自定义模型
+        in: query
+        name: model
+        type: string
+      produces:
+      - text/event-stream
+      responses:
+        "200":
+          description: SSE stream
+          schema:
+            type: string
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: SSE 流式回合
+      tags:
+      - play-engine
+  /play/sessions/{id}/suggest:
+    post:
+      description: Impersonate 模式生成建议，不写入 Floor
+      parameters:
+      - description: 会话 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: AI 帮答
+      tags:
+      - play-engine
+  /play/sessions/{id}/tool-executions:
+    get:
+      description: 查询会话的工具执行记录
+      parameters:
+      - description: 会话 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: 按楼层过滤
+        in: query
+        name: floor_id
+        type: string
+      - description: 返回条数（默认 50）
+        in: query
+        name: limit
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 工具执行记录
+      tags:
+      - play-engine
+  /play/sessions/{id}/turn:
+    post:
+      consumes:
+      - application/json
+      description: 提交用户输入，执行一回合游戏逻辑
+      parameters:
+      - description: 会话 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: 回合请求
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/internal_engine_api.TurnRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties: true
+            type: object
+        "409":
+          description: 并发生成冲突
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 执行游戏回合
+      tags:
+      - play-engine
+  /play/sessions/{id}/variables:
+    get:
+      description: 返回会话当前变量快照
+      parameters:
+      - description: 会话 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "404":
+          description: Not Found
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 获取会话变量
+      tags:
+      - play-engine
+    patch:
+      consumes:
+      - application/json
+      description: 以 merge 方式更新会话变量（只覆盖传入的 key）
+      parameters:
+      - description: 会话 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: 要合并的变量
+        in: body
+        name: body
+        required: true
+        schema:
+          additionalProperties: true
+          type: object
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 合并更新会话变量
+      tags:
+      - play-engine
+  /play/sessions/import:
+    post:
+      consumes:
+      - application/json
+      description: 从 .thchat JSON 导入会话（所有 ID 重映射为新 UUID）
+      parameters:
+      - description: .thchat 导入数据
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/internal_engine_api.ThchatExport'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: session_id
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 导入会话
+      tags:
+      - play-engine
+  /social/comments/{id}:
+    delete:
+      description: 软删除评论（作者或游戏设计者）
+      parameters:
+      - description: 评论 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 删除评论
+      tags:
+      - social-comments
+    patch:
+      consumes:
+      - application/json
+      description: 编辑自己的评论（5 分钟内）
+      parameters:
+      - description: 评论 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: 新内容
+        in: body
+        name: body
+        required: true
+        schema:
+          properties:
+            content:
+              type: string
+          type: object
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 编辑评论
+      tags:
+      - social-comments
+  /social/comments/{id}/replies:
+    get:
+      description: 获取评论的回复列表
+      parameters:
+      - description: 评论 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 回复列表
+      tags:
+      - social-comments
+    post:
+      consumes:
+      - application/json
+      description: 回复指定评论
+      parameters:
+      - description: 评论 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: 回复内容
+        in: body
+        name: body
+        required: true
+        schema:
+          properties:
+            content:
+              type: string
+          type: object
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 回复评论
+      tags:
+      - social-comments
+  /social/comments/{id}/vote:
+    delete:
+      parameters:
+      - description: 评论 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 取消点赞评论
+      tags:
+      - social-comments
+    post:
+      parameters:
+      - description: 评论 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 点赞评论
+      tags:
+      - social-comments
+  /social/games/{id}/comments:
+    get:
+      description: 获取游戏的顶层评论（支持 linear/nested 模式）
+      parameters:
+      - description: 游戏 ID
+        in: path
+        name: id
+        type: string
+      - description: 模式：linear（默认）| nested
+        in: query
+        name: mode
+        type: string
+      - description: 每页数量
+        in: query
+        name: limit
+        type: integer
+      - description: 偏移量
+        in: query
+        name: offset
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 评论列表
+      tags:
+      - social-comments
+    post:
+      consumes:
+      - application/json
+      description: 在游戏下发表主楼评论
+      parameters:
+      - description: 游戏 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: 评论内容
+        in: body
+        name: body
+        required: true
+        schema:
+          properties:
+            content:
+              type: string
+          type: object
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 发表评论
+      tags:
+      - social-comments
+  /social/posts:
+    get:
+      description: 论坛帖子列表（支持游戏标签/排序/搜索）
+      parameters:
+      - description: 按游戏标签过滤
+        in: query
+        name: game_tag
+        type: string
+      - description: 排序：hot（默认）| new
+        in: query
+        name: sort
+        type: string
+      - description: 全文搜索
+        in: query
+        name: q
+        type: string
+      - description: 每页数量
+        in: query
+        name: limit
+        type: integer
+      - description: 偏移量
+        in: query
+        name: offset
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 帖子列表
+      tags:
+      - social-forum
+    post:
+      consumes:
+      - application/json
+      description: 创建论坛帖子
+      parameters:
+      - description: 帖子内容
+        in: body
+        name: body
+        required: true
+        schema:
+          properties:
+            content:
+              type: string
+            game_tag:
+              type: string
+            title:
+              type: string
+          type: object
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 发帖
+      tags:
+      - social-forum
+  /social/posts/{id}:
+    delete:
+      description: 软删除帖子（仅作者）
+      parameters:
+      - description: 帖子 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 删除帖子
+      tags:
+      - social-forum
+    get:
+      description: 按 ID 或 slug 获取帖子详情
+      parameters:
+      - description: 帖子 ID 或 slug
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "404":
+          description: Not Found
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 帖子详情
+      tags:
+      - social-forum
+    patch:
+      consumes:
+      - application/json
+      description: 编辑自己的帖子
+      parameters:
+      - description: 帖子 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: 更新内容
+        in: body
+        name: body
+        required: true
+        schema:
+          properties:
+            content:
+              type: string
+            title:
+              type: string
+          type: object
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 编辑帖子
+      tags:
+      - social-forum
+  /social/posts/{id}/replies:
+    get:
+      description: 获取帖子的盖楼回复
+      parameters:
+      - description: 帖子 ID
+        in: path
+        name: id
+        type: string
+      - description: 每页数量
+        in: query
+        name: limit
+        type: integer
+      - description: 偏移量
+        in: query
+        name: offset
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 帖子回复列表
+      tags:
+      - social-forum
+    post:
+      consumes:
+      - application/json
+      description: 在帖子下盖楼
+      parameters:
+      - description: 帖子 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: 回复内容
+        in: body
+        name: body
+        required: true
+        schema:
+          properties:
+            content:
+              type: string
+          type: object
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 回复帖子
+      tags:
+      - social-forum
+  /social/posts/{id}/vote:
+    delete:
+      parameters:
+      - description: 帖子 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 取消点赞帖子
+      tags:
+      - social-forum
+    post:
+      parameters:
+      - description: 帖子 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 点赞帖子
+      tags:
+      - social-forum
+  /social/reactions/{target_type}/{target_id}/{type}:
+    delete:
+      description: 取消对目标的点赞/收藏
+      parameters:
+      - description: 目标类型（game/comment/post）
+        in: path
+        name: target_type
+        required: true
+        type: string
+      - description: 目标 ID
+        in: path
+        name: target_id
+        required: true
+        type: string
+      - description: Reaction 类型（like/favorite）
+        in: path
+        name: type
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 移除 Reaction
+      tags:
+      - social-reactions
+    post:
+      description: 对目标添加点赞/收藏
+      parameters:
+      - description: 目标类型（game/comment/post）
+        in: path
+        name: target_type
+        required: true
+        type: string
+      - description: 目标 ID
+        in: path
+        name: target_id
+        required: true
+        type: string
+      - description: Reaction 类型（like/favorite）
+        in: path
+        name: type
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 添加 Reaction
+      tags:
+      - social-reactions
+  /social/reactions/counts:
+    get:
+      description: 传入 targets 查询参数（格式：type:id,type:id）批量获取计数
+      parameters:
+      - description: 目标列表（game:uuid,post:uuid）
+        in: query
+        name: targets
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 批量查询 Reaction 计数
+      tags:
+      - social-reactions
+  /social/reactions/mine/{target_type}/{target_id}:
+    get:
+      description: 查看当前用户对指定目标的 reaction 状态
+      parameters:
+      - description: 目标类型（game/comment/post）
+        in: path
+        name: target_type
+        required: true
+        type: string
+      - description: 目标 ID
+        in: path
+        name: target_id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 查询自己的 Reaction 状态
+      tags:
+      - social-reactions
+securityDefinitions:
+  BearerAuth:
+    in: header
+    name: Authorization
+    type: apiKey
+swagger: "2.0"

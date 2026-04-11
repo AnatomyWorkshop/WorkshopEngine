@@ -26,6 +26,7 @@ import (
 	"gorm.io/gorm"
 	dbmodels "mvu-backend/internal/core/db"
 	"mvu-backend/internal/core/llm"
+	"mvu-backend/internal/core/secrets"
 )
 
 // ProviderID 预定义的 Provider 名称常量
@@ -34,17 +35,17 @@ const (
 	IDMemory  = "memory"  // 记忆整合用的廉价 Provider
 )
 
-// Provider 持有一个已配置的 LLM 客户端及其元数据。
+// Provider 持有一个已配置的 LLM Provider 及其元数据。
 type Provider struct {
-	ID      string // 逻辑名，如 "default" / "memory" / "user-gpt4"
-	Type    string // openai-compatible | openai | anthropic | google | deepseek | xai
+	Name    string       // 逻辑名，如 "default" / "memory" / "user-gpt4"
+	Type    string       // openai-compatible | openai | anthropic | google | deepseek | xai
 	BaseURL string
 	ModelID string
-	client  *llm.Client // 不对外暴露；通过 Client() 获取
+	client  llm.Provider // 不对外暴露；通过 Client() 获取
 }
 
 // Client 返回该 Provider 的 LLM 客户端。
-func (p *Provider) Client() *llm.Client { return p.client }
+func (p *Provider) Client() llm.Provider { return p.client }
 
 // Registry 持有命名 Provider，并提供 DB-based 的 slot 解析。
 // 线程安全：注册只在启动时发生，并发读取通过 RWMutex 保护。
@@ -52,6 +53,7 @@ type Registry struct {
 	mu        sync.RWMutex
 	providers map[string]*Provider
 	defaultID string
+	masterKey string // SECRETS_MASTER_KEY（空 = 开发模式，回退明文）
 }
 
 // New 创建空的注册表。
@@ -63,9 +65,9 @@ func New() *Registry {
 func (r *Registry) Register(p *Provider) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.providers[p.ID] = p
+	r.providers[p.Name] = p
 	if r.defaultID == "" {
-		r.defaultID = p.ID
+		r.defaultID = p.Name
 	}
 }
 
@@ -94,12 +96,14 @@ func NewFromEnv(
 	baseURL, apiKey, model string,
 	timeoutSec, maxRetries int,
 	memModel string,
+	masterKey string,
 ) *Registry {
 	r := New()
+	r.masterKey = masterKey
 
 	defaultClient := llm.NewClient(baseURL, apiKey, model, timeoutSec, maxRetries)
 	r.Register(&Provider{
-		ID:      IDDefault,
+		Name:    IDDefault,
 		Type:    "openai-compatible",
 		BaseURL: baseURL,
 		ModelID: model,
@@ -112,7 +116,7 @@ func NewFromEnv(
 		memClient = llm.NewClient(baseURL, apiKey, memModel, timeoutSec, maxRetries)
 	}
 	r.Register(&Provider{
-		ID:      IDMemory,
+		Name:    IDMemory,
 		Type:    "openai-compatible",
 		BaseURL: baseURL,
 		ModelID: memModel,
@@ -131,25 +135,29 @@ func NewFromEnv(
 func (r *Registry) ResolveForSlot(
 	db *gorm.DB,
 	accountID, sessionID, slot string,
-) (client *llm.Client, opts llm.Options, ok bool) {
+) (client llm.Provider, opts llm.Options, ok bool) {
 	type resolveRow struct {
-		BindingParams []byte `gorm:"column:binding_params"`
-		ProfileID     string `gorm:"column:profile_id"`
-		ModelID       string `gorm:"column:model_id"`
-		BaseURL       string `gorm:"column:base_url"`
-		APIKey        string `gorm:"column:api_key"`
-		ProfileParams []byte `gorm:"column:profile_params"`
+		BindingParams   []byte `gorm:"column:binding_params"`
+		ProfileID       string `gorm:"column:profile_id"`
+		ProviderType    string `gorm:"column:provider"`
+		ModelID         string `gorm:"column:model_id"`
+		BaseURL         string `gorm:"column:base_url"`
+		APIKey          string `gorm:"column:api_key"`
+		APIKeyEncrypted string `gorm:"column:api_key_encrypted"`
+		ProfileParams   []byte `gorm:"column:profile_params"`
 	}
 
 	var row resolveRow
 	err := db.Raw(`
 		SELECT
-			b.params      AS binding_params,
-			p.id          AS profile_id,
-			p.model_id    AS model_id,
-			p.base_url    AS base_url,
-			p.api_key     AS api_key,
-			p.params      AS profile_params
+			b.params              AS binding_params,
+			p.id                  AS profile_id,
+			p.provider            AS provider,
+			p.model_id            AS model_id,
+			p.base_url            AS base_url,
+			p.api_key             AS api_key,
+			p.api_key_encrypted   AS api_key_encrypted,
+			p.params              AS profile_params
 		FROM llm_profile_bindings b
 		JOIN llm_profiles p
 		  ON p.id::text = b.profile_id
@@ -176,8 +184,17 @@ func (r *Registry) ResolveForSlot(
 		return nil, llm.Options{}, false
 	}
 
-	// 构建客户端（使用 profile 中保存的 BaseURL 和 APIKey）
-	// 超时/重试使用 default provider 的设置
+	// 解密 API Key（优先使用加密列，回退明文列兼容旧数据）
+	apiKey := row.APIKey
+	if row.APIKeyEncrypted != "" && r.masterKey != "" {
+		decrypted, err := secrets.Decrypt(row.APIKeyEncrypted, r.masterKey)
+		if err != nil {
+			return nil, llm.Options{}, false
+		}
+		apiKey = decrypted
+	}
+
+	// 构建客户端
 	baseURL := row.BaseURL
 	def := r.Default()
 	if baseURL == "" && def != nil {
@@ -188,7 +205,7 @@ func (r *Registry) ResolveForSlot(
 	if def != nil {
 		timeoutSec, maxRetries = extractClientTimeouts(def.client)
 	}
-	profileClient := llm.NewClient(baseURL, row.APIKey, row.ModelID, timeoutSec, maxRetries)
+	profileClient := llm.NewProvider(row.ProviderType, baseURL, apiKey, row.ModelID, timeoutSec, maxRetries)
 
 	// 叠加采样参数：profile params → binding params（binding 优先）
 	opts = paramsToOpts(row.ProfileParams, row.ModelID)
@@ -257,22 +274,30 @@ func applyGenParams(opts *llm.Options, p *genParams) {
 	}
 }
 
-// extractClientTimeouts 从 Client 读取超时和重试设置。
-func extractClientTimeouts(c *llm.Client) (timeoutSec, maxRetries int) {
-	if c == nil {
+// extractClientTimeouts 从 Provider 读取超时和重试设置。
+func extractClientTimeouts(p llm.Provider) (timeoutSec, maxRetries int) {
+	if p == nil {
 		return 60, 2
 	}
-	return c.TimeoutSec(), c.MaxRetries()
+	if c, ok := p.(*llm.Client); ok {
+		return c.TimeoutSec(), c.MaxRetries()
+	}
+	return 60, 2
 }
 
 // NewProviderFromProfile 根据 LLMProfile DB 记录动态创建 Provider（供未来扩展使用）。
-func NewProviderFromProfile(p dbmodels.LLMProfile, timeoutSec, maxRetries int) *Provider {
-	baseURL := p.BaseURL
-	client := llm.NewClient(baseURL, p.APIKey, p.ModelID, timeoutSec, maxRetries)
+func NewProviderFromProfile(p dbmodels.LLMProfile, timeoutSec, maxRetries int, masterKey string) *Provider {
+	apiKey := p.APIKey
+	if p.APIKeyEncrypted != "" && masterKey != "" {
+		if dec, err := secrets.Decrypt(p.APIKeyEncrypted, masterKey); err == nil {
+			apiKey = dec
+		}
+	}
+	client := llm.NewProvider(p.Provider, p.BaseURL, apiKey, p.ModelID, timeoutSec, maxRetries)
 	return &Provider{
-		ID:      "profile-" + p.ID,
+		Name:    "profile-" + p.ID,
 		Type:    p.Provider,
-		BaseURL: baseURL,
+		BaseURL: p.BaseURL,
 		ModelID: p.ModelID,
 		client:  client,
 	}

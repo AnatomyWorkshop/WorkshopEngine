@@ -26,6 +26,7 @@ const (
 	ModeOff      Mode = "off"       // 不校验任何凭证
 	ModeAPIKey   Mode = "api_key"   // 单个 Admin Key
 	ModeMultiKey Mode = "multi_key" // 多 Key，每 Key 对应一个 account_id
+	ModeJWT      Mode = "jwt"       // JWT Bearer token（HS256）
 )
 
 const (
@@ -49,6 +50,9 @@ type Config struct {
 	// 格式：key1:acc1,key2:acc2
 	KeyAccountMap map[string]string
 
+	// ModeJWT：HS256 签名密钥，通过 AUTH_JWT_SECRET 设置
+	JWTSecret string
+
 	// AllowAnonymous 为 true 时，未提供账户 ID 的请求仍然放行，
 	// account_id 设为 DefaultAccountID（"anonymous"）
 	AllowAnonymous bool
@@ -60,18 +64,27 @@ type Config struct {
 //
 //	auth.NewConfigFromEnv(os.Getenv("ADMIN_KEY"), os.Getenv("AUTH_API_KEYS"),
 //	    os.Getenv("AUTH_KEY_ACCOUNT_MAP"), os.Getenv("ALLOW_ANONYMOUS") != "false")
-func NewConfigFromEnv(adminKey, apiKeysCSV, keyAccountMapCSV string, allowAnon bool) Config {
-	cfg := Config{AllowAnonymous: allowAnon}
+func NewConfigFromEnv(adminKey, apiKeysCSV, keyAccountMapCSV string, allowAnon bool, authMode, jwtSecret string) Config {
+	cfg := Config{AllowAnonymous: allowAnon, AdminKey: adminKey, JWTSecret: jwtSecret}
 
+	// 显式 AUTH_MODE 优先
+	if authMode == "jwt" && jwtSecret != "" {
+		cfg.Mode = ModeJWT
+		return cfg
+	}
+	if authMode == "off" {
+		cfg.Mode = ModeOff
+		return cfg
+	}
+
+	// 自动检测（向后兼容）
 	if apiKeysCSV != "" {
-		// ModeMultiKey：提供了多 Key 列表
 		keys := splitTrimmed(apiKeysCSV, ",")
 		cfg.Mode = ModeMultiKey
 		cfg.APIKeys = keys
 		cfg.KeyAccountMap = parseKeyAccountMap(keyAccountMapCSV)
 	} else if adminKey != "" {
 		cfg.Mode = ModeAPIKey
-		cfg.AdminKey = adminKey
 	} else {
 		cfg.Mode = ModeOff
 	}
@@ -109,6 +122,21 @@ func Middleware(cfg Config) gin.HandlerFunc {
 				abort(c, "invalid or missing api key")
 				return
 			}
+		case ModeJWT:
+			token := extractKey(c)
+			if token == "" {
+				abort(c, "missing bearer token")
+				return
+			}
+			accountID, err := ParseToken(token, cfg.JWTSecret)
+			if err != nil {
+				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+					"code":  "invalid_token",
+					"error": err.Error(),
+				})
+				return
+			}
+			c.Set(ContextKeyAccountID, accountID)
 		}
 
 		// 若 account_id 尚未由 key 映射注入，则从 header / query 读取

@@ -160,6 +160,37 @@ type PromptSnapshot struct {
 	CreatedAt             time.Time      `json:"created_at"`
 }
 
+// ──────────────────────────────────────────────────────
+// 后台任务运行时（P-4G）
+// ──────────────────────────────────────────────────────
+
+// JobStatus 后台任务状态机
+type JobStatus string
+
+const (
+	JobQueued JobStatus = "queued" // 等待执行
+	JobLeased JobStatus = "leased" // 已被 worker 租约
+	JobDone   JobStatus = "done"   // 执行成功
+	JobFailed JobStatus = "failed" // 执行失败（可重试）
+	JobDead   JobStatus = "dead"   // 死信（超过最大重试次数）
+)
+
+// RuntimeJob DB 持久化的后台任务
+type RuntimeJob struct {
+	ID         string         `gorm:"primaryKey;type:uuid;default:gen_random_uuid()" json:"id"`
+	JobType    string         `gorm:"not null;index"                                 json:"job_type"`    // memory_consolidation / ...
+	SessionID  string         `gorm:"not null;index"                                 json:"session_id"`
+	Payload    datatypes.JSON `gorm:"type:jsonb;default:'{}'"                        json:"payload"`
+	Status     JobStatus      `gorm:"not null;default:'queued';index"                json:"status"`
+	LeaseUntil *time.Time     `gorm:"index"                                          json:"lease_until"`
+	RetryCount int            `gorm:"default:0"                                      json:"retry_count"`
+	MaxRetries int            `gorm:"default:3"                                      json:"max_retries"`
+	ErrorLog   string         `gorm:"type:text"                                      json:"error_log"`
+	DedupeKey  string         `gorm:"uniqueIndex"                                    json:"dedupe_key"`  // job_type:session_id 去重
+	CreatedAt  time.Time      `json:"created_at"`
+	UpdatedAt  time.Time      `json:"updated_at"`
+}
+
 // ToolExecutionRecord 记录 Agentic Loop 中每次工具调用的入参、出参和耗时。
 // 用于审计、调试和 replay 决策（结合 ReplaySafety 等级）。
 type ToolExecutionRecord struct {

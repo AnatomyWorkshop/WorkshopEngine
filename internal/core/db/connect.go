@@ -53,5 +53,7 @@ func migrate(db *gorm.DB) error {
 		&PresetTool{},
 		// Prompt 快照（Verifier 结果 + 命中词条）
 		&PromptSnapshot{},
+		// 后台任务运行时（P-4G）
+		&RuntimeJob{},
 	)
 }

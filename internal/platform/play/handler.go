@@ -31,7 +31,19 @@ func NewHandler(db *gorm.DB, engine SessionCreator, commentSvc *comment.Service)
 	return &Handler{db: db, engine: engine, comment: commentSvc}
 }
 
-// listGames GET /play/games — 已发布游戏列表（分页/标签/类型/排序）
+// listGames 已发布游戏列表
+// @Summary     游戏列表
+// @Description 分页查询已发布游戏（支持标签/类型/排序）
+// @Tags        play-discovery
+// @Produce     json
+// @Param       tags   query string false "逗号分隔标签过滤"
+// @Param       type   query string false "游戏类型"
+// @Param       sort   query string false "排序：new（默认）| hot"
+// @Param       limit  query int    false "每页数量" default(20)
+// @Param       offset query int    false "偏移量"
+// @Success     200 {object} map[string]any
+// @Security    BearerAuth
+// @Router      /play/games [get]
 func (h *Handler) listGames(c *gin.Context) {
 	limit, offset := util.ParsePage(c)
 
@@ -76,7 +88,16 @@ func (h *Handler) listGames(c *gin.Context) {
 	}})
 }
 
-// getGame GET /play/games/:slug — 单个游戏详情（slug 或 UUID），附加 comment_config（A-10）
+// getGame 游戏详情
+// @Summary     游戏详情
+// @Description 按 slug 或 UUID 查询已发布游戏详情（含 comment_config）
+// @Tags        play-discovery
+// @Produce     json
+// @Param       slug path string true "游戏 slug 或 UUID"
+// @Success     200 {object} map[string]any
+// @Failure     404 {object} map[string]any
+// @Security    BearerAuth
+// @Router      /play/games/{slug} [get]
 func (h *Handler) getGame(c *gin.Context) {
 	slug := c.Param("slug")
 	var tmpl dbmodels.GameTemplate
@@ -98,7 +119,17 @@ func (h *Handler) getGame(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"code": 0, "data": view})
 }
 
-// getWorldbook GET /play/games/worldbook/:id — 玩家只读世界书
+// getWorldbook 玩家只读世界书
+// @Summary     玩家世界书
+// @Description 查看已发布游戏的世界书词条（需游戏开启 allow_player_worldbook_view）
+// @Tags        play-discovery
+// @Produce     json
+// @Param       id path string true "游戏 ID"
+// @Success     200 {object} map[string]any
+// @Failure     403 {object} map[string]any
+// @Failure     404 {object} map[string]any
+// @Security    BearerAuth
+// @Router      /play/games/worldbook/{id} [get]
 func (h *Handler) getWorldbook(c *gin.Context) {
 	var tmpl dbmodels.GameTemplate
 	if err := h.db.First(&tmpl, "id = ? AND status = 'published'", c.Param("id")).Error; err != nil {
@@ -124,7 +155,18 @@ func (h *Handler) getWorldbook(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"code": 0, "data": entries})
 }
 
-// listSessions GET /play/sessions — 列出会话（?game_id=&user_id=&limit=&offset=）
+// listSessions 会话列表
+// @Summary     会话列表
+// @Description 列出玩家会话（支持 game_id/user_id 过滤）
+// @Tags        play-discovery
+// @Produce     json
+// @Param       game_id query string false "按游戏过滤"
+// @Param       user_id query string false "按用户过滤"
+// @Param       limit   query int    false "每页数量" default(20)
+// @Param       offset  query int    false "偏移量"
+// @Success     200 {object} map[string]any
+// @Security    BearerAuth
+// @Router      /play/sessions [get]
 func (h *Handler) listSessions(c *gin.Context) {
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
 	offset, _ := strconv.Atoi(c.DefaultQuery("offset", "0"))
@@ -148,7 +190,17 @@ func (h *Handler) listSessions(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"code": 0, "data": sessions})
 }
 
-// createSession POST /play/sessions — 创建会话，原子递增 play_count
+// createSession 创建会话
+// @Summary     创建会话
+// @Description 为指定游戏创建新会话（自动注入 first_mes，递增 play_count）
+// @Tags        play-discovery
+// @Accept      json
+// @Produce     json
+// @Param       body body object{game_id=string,user_id=string} true "创建请求"
+// @Success     200 {object} map[string]any "session_id"
+// @Failure     400 {object} map[string]any
+// @Security    BearerAuth
+// @Router      /play/sessions [post]
 func (h *Handler) createSession(c *gin.Context) {
 	var req struct {
 		GameID string `json:"game_id" binding:"required"`

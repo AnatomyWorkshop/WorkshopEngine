@@ -11,10 +11,12 @@ import (
 
 // Config 全局配置（强类型，不散落 os.Getenv）
 type Config struct {
-	Server ServerConfig
-	DB     DBConfig
-	LLM    LLMConfig
-	Worker WorkerConfig
+	Server  ServerConfig
+	DB      DBConfig
+	LLM     LLMConfig
+	Worker  WorkerConfig
+	Secrets SecretsConfig
+	Auth    AuthConfig
 }
 
 type ServerConfig struct {
@@ -24,6 +26,16 @@ type ServerConfig struct {
 
 type DBConfig struct {
 	DSN string // PostgreSQL DSN 或 sqlite://path
+}
+
+type SecretsConfig struct {
+	MasterKey string // SECRETS_MASTER_KEY（hex，≥32 字节；空 = 开发模式不加密）
+}
+
+type AuthConfig struct {
+	Mode        string // AUTH_MODE: off | jwt（空 = 自动检测旧模式）
+	JWTSecret   string // AUTH_JWT_SECRET（HS256 签名密钥）
+	JWTTTLHours int    // AUTH_JWT_TTL_HOURS（默认 168 = 7 天）
 }
 
 // LLMConfig LLM 服务配置。
@@ -140,10 +152,21 @@ func Load() (*Config, error) {
 			PurgeAfterDays:           envInt("MEMORY_PURGE_AFTER_DAYS", 30),
 			MaintenanceIntervalSec:   envInt("MEMORY_MAINTENANCE_INTERVAL_SEC", 3600),
 		},
+		Secrets: SecretsConfig{
+			MasterKey: env("SECRETS_MASTER_KEY"),
+		},
+		Auth: AuthConfig{
+			Mode:        env("AUTH_MODE"),
+			JWTSecret:   env("AUTH_JWT_SECRET"),
+			JWTTTLHours: envInt("AUTH_JWT_TTL_HOURS", 168),
+		},
 	}
 
 	if c.LLM.APIKey == "" {
 		return nil, fmt.Errorf("LLM_API_KEY is required")
+	}
+	if c.Secrets.MasterKey == "" {
+		fmt.Println("[WARN] SECRETS_MASTER_KEY not set — API keys stored unencrypted (dev mode)")
 	}
 	return c, nil
 }

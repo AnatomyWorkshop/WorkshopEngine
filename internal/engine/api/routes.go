@@ -434,4 +434,7 @@ func RegisterGameRoutes(rg *gin.RouterGroup, engine *GameEngine) {
 		}
 		c.JSON(http.StatusOK, gin.H{"code": 0, "data": gin.H{"deleted": true}})
 	})
+
+	// ── 会话导入/导出（P-4E）──────────────────────────────────────────────────
+	registerExportImportRoutes(play, engine)
 }

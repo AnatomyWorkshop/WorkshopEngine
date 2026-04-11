@@ -587,6 +587,14 @@ func (s *Store) FindSessionsNeedingConsolidation(triggerRounds, batchSize int) (
 	return sessions, err
 }
 
+// GetFloorCount 返回指定 session 的当前楼层数。
+func (s *Store) GetFloorCount(sessionID string) int {
+	var count int
+	s.db.Model(&dbmodels.GameSession{}).Where("id = ?", sessionID).
+		Select("floor_count").Scan(&count)
+	return count
+}
+
 // ── 全局维护（对应 TH MemoryMaintenancePolicy）────────────────────────────────
 
 // DeprecateOldMemoriesGlobal 将所有 session 中超过 olderThanDays 天的 summary 记忆标记为 deprecated。

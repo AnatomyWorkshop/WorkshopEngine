@@ -57,7 +57,7 @@ func (e *GameEngine) runVerifier(
 	customPrompt string, // 来自 GameTemplate.Config.verifier_prompt，空串则用默认值
 ) (*VerifierResult, error) {
 	// 1. 解析 verifier slot（无绑定则跳过）
-	verClient, verOpts, ok := func() (*llm.Client, llm.Options, bool) {
+	verClient, verOpts, ok := func() (llm.Provider, llm.Options, bool) {
 		if e.registry == nil {
 			return nil, llm.Options{}, false
 		}
