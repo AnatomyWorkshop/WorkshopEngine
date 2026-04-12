@@ -198,6 +198,31 @@ func RegisterGameRoutes(rg *gin.RouterGroup, engine *GameEngine) {
 		c.JSON(http.StatusOK, gin.H{"code": 0, "data": gin.H{"suggestion": suggestion}})
 	})
 
+	// PATCH /sessions/:id/floors/:fid — 编辑楼层内容（仅 user 消息）
+	play.PATCH("/sessions/:id/floors/:fid", func(c *gin.Context) {
+		var body struct {
+			Content string `json:"content" binding:"required"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		if err := engine.EditFloor(c.Request.Context(), c.Param("fid"), body.Content); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"code": 0})
+	})
+
+	// DELETE /sessions/:id/floors/:fid — 删除楼层及其所有页
+	play.DELETE("/sessions/:id/floors/:fid", func(c *gin.Context) {
+		if err := engine.DeleteFloor(c.Request.Context(), c.Param("id"), c.Param("fid")); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"code": 0})
+	})
+
 	// GET /sessions/:id/floors/:fid/pages — Swipe 页列表
 	play.GET("/sessions/:id/floors/:fid/pages", func(c *gin.Context) {
 		pages, err := engine.ListPages(c.Request.Context(), c.Param("fid"))

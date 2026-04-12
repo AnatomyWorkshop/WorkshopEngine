@@ -142,13 +142,16 @@ func (h *Handler) getWorldbook(c *gin.Context) {
 		return
 	}
 	var entries []struct {
-		ID      string `json:"id"`
-		Keys    any    `json:"keys"`
-		Content string `json:"content"`
-		Comment string `json:"comment"`
+		ID              string `json:"id"`
+		Keys            any    `json:"keys"`
+		Content         string `json:"content"`
+		Comment         string `json:"comment"`
+		Constant        bool   `json:"constant"`
+		PlayerVisible   bool   `json:"player_visible"`
+		DisplayCategory string `json:"display_category"`
 	}
 	h.db.Model(&dbmodels.WorldbookEntry{}).
-		Select("id, keys, content, comment").
+		Select("id, keys, content, comment, constant, player_visible, display_category").
 		Where("game_id = ? AND enabled = true", c.Param("id")).
 		Order("priority ASC").
 		Find(&entries)
@@ -220,16 +223,23 @@ func (h *Handler) createSession(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"code": 0, "data": gin.H{"session_id": sessID}})
 }
 
-// publicGameView 构造玩家侧游戏视图，过滤创作者私有字段，提取 ui_config 子字段。
+// publicGameView 构造玩家侧游戏视图，过滤创作者私有字段，提取 ui_config / tags 子字段。
 func publicGameView(t dbmodels.GameTemplate) map[string]any {
 	var uiConfig map[string]any
+	var tags []any
 	if len(t.Config) > 0 {
 		var cfg map[string]any
 		if json.Unmarshal(t.Config, &cfg) == nil {
 			if v, ok := cfg["ui_config"]; ok {
 				uiConfig, _ = v.(map[string]any)
 			}
+			if v, ok := cfg["tags"]; ok {
+				tags, _ = v.([]any)
+			}
 		}
+	}
+	if tags == nil {
+		tags = []any{}
 	}
 	return map[string]any{
 		"id":             t.ID,
@@ -240,10 +250,13 @@ func publicGameView(t dbmodels.GameTemplate) map[string]any {
 		"notes":          t.Notes,
 		"cover_url":      t.CoverURL,
 		"author_id":      t.AuthorID,
+		// author_name: 当前后端无 users 表，前端显示 author_id 或由前端自行 fallback。
+		// 待 platform/user 包建立后补充 JOIN 查询。
 		"play_count":     t.PlayCount,
 		"like_count":     t.LikeCount,
 		"favorite_count": t.FavoriteCount,
 		"ui_config":      uiConfig,
+		"tags":           tags,
 		"created_at":     t.CreatedAt,
 	}
 }

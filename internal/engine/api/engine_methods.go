@@ -7,6 +7,7 @@ import (
 	"math/rand"
 	"strings"
 
+	"gorm.io/datatypes"
 	"gorm.io/gorm"
 	dbmodels "mvu-backend/internal/core/db"
 	"mvu-backend/internal/core/llm"
@@ -298,6 +299,9 @@ func (e *GameEngine) StreamTurn(ctx context.Context, req TurnRequest) (<-chan st
 		// ── 2. 加载世界书 / Preset / Regex（与 PlayTurn 完全一致）───
 		var wbEntries []dbmodels.WorldbookEntry
 		e.db.Where("game_id = ? AND enabled = true", sess.GameID).Find(&wbEntries)
+		if sess.UserID != "" {
+			wbEntries = applyWorldbookOverrides(e.db, sess.GameID, sess.UserID, wbEntries)
+		}
 		var presetEntries []dbmodels.PresetEntry
 		e.db.Where("game_id = ? AND enabled = true", sess.GameID).
 			Order("injection_order ASC").Find(&presetEntries)
@@ -370,6 +374,8 @@ func (e *GameEngine) StreamTurn(ctx context.Context, req TurnRequest) (<-chan st
 		}
 
 		// ── 5. 转换 WorldbookEntry / PresetEntry / Regex → IR ─────
+		// probability 过滤 + sticky 持续激活（A-22）
+		wbEntries, updatedStickyMap := applyStickyAndProbability(wbEntries, sess.StickyEntries, newRng())
 		var wbIR []prompt_ir.WorldbookEntry
 		for _, entry := range wbEntries {
 			var keys, secondaryKeys []string
@@ -380,10 +386,15 @@ func (e *GameEngine) StreamTurn(ctx context.Context, req TurnRequest) (<-chan st
 				SecondaryLogic: entry.SecondaryLogic, Content: entry.Content,
 				Constant: entry.Constant, Priority: entry.Priority,
 				ScanDepth: entry.ScanDepth, Position: entry.Position,
-				Depth: entry.Depth,
-				WholeWord: entry.WholeWord, Enabled: entry.Enabled,
-				Group: entry.Group, GroupWeight: entry.GroupWeight,
+				Depth:       entry.Depth,
+				WholeWord:   entry.WholeWord, Enabled: entry.Enabled,
+				Group:       entry.Group, GroupWeight: entry.GroupWeight,
+				Probability: entry.Probability, Sticky: entry.Sticky,
 			})
+		}
+		if stickyJSON, err := json.Marshal(updatedStickyMap); err == nil {
+			e.db.Model(&dbmodels.GameSession{}).Where("id = ?", req.SessionID).
+				Update("sticky_entries", stickyJSON)
 		}
 		var presetIR []prompt_ir.PresetEntry
 		for _, pe := range presetEntries {
@@ -888,6 +899,48 @@ func (e *GameEngine) ListFloors(_ context.Context, sessionID string) ([]session.
 	return e.sessions.ListFloors(sessionID, "")
 }
 
+// EditFloor 编辑楼层内容（仅允许编辑 role=user 的楼层）
+// 找到激活页，将其 messages 中第一条 role=user 的消息内容替换为 newContent。
+func (e *GameEngine) EditFloor(_ context.Context, floorID, newContent string) error {
+	var page dbmodels.MessagePage
+	if err := e.db.Where("floor_id = ? AND is_active = true", floorID).First(&page).Error; err != nil {
+		return fmt.Errorf("floor not found: %w", err)
+	}
+	var msgs []map[string]string
+	if err := json.Unmarshal(page.Messages, &msgs); err != nil {
+		return fmt.Errorf("parse messages: %w", err)
+	}
+	edited := false
+	for i, m := range msgs {
+		if m["role"] == "user" {
+			msgs[i]["content"] = newContent
+			edited = true
+			break
+		}
+	}
+	if !edited {
+		return fmt.Errorf("no user message in floor")
+	}
+	raw, _ := json.Marshal(msgs)
+	return e.db.Model(&page).Update("messages", datatypes.JSON(raw)).Error
+}
+
+// DeleteFloor 删除单个楼层及其所有 MessagePage。
+// 同时将 session.floor_count 减 1（若大于 0）。
+func (e *GameEngine) DeleteFloor(_ context.Context, sessionID, floorID string) error {
+	return e.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("floor_id = ?", floorID).Delete(&dbmodels.MessagePage{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("id = ? AND session_id = ?", floorID, sessionID).Delete(&dbmodels.Floor{}).Error; err != nil {
+			return err
+		}
+		tx.Model(&dbmodels.GameSession{}).Where("id = ? AND floor_count > 0", sessionID).
+			UpdateColumn("floor_count", gorm.Expr("floor_count - 1"))
+		return nil
+	})
+}
+
 // ── 分支管理（P-3G）────────────────────────────────────────────────────────────
 
 // ListBranches 列出 session 的所有分支（含隐式 main）
@@ -1020,6 +1073,10 @@ func (e *GameEngine) PromptPreview(ctx context.Context, sessionID, userInput str
 	// 加载世界书 + Preset Entry
 	var wbEntries []dbmodels.WorldbookEntry
 	e.db.Where("game_id = ? AND enabled = true", sess.GameID).Find(&wbEntries)
+	if sess.UserID != "" {
+		wbEntries = applyWorldbookOverrides(e.db, sess.GameID, sess.UserID, wbEntries)
+	}
+	wbEntries, _ = applyStickyAndProbability(wbEntries, sess.StickyEntries, newRng())
 	var presetEntries []dbmodels.PresetEntry
 	e.db.Where("game_id = ? AND enabled = true", sess.GameID).
 		Order("injection_order ASC").Find(&presetEntries)
@@ -1059,6 +1116,7 @@ func (e *GameEngine) PromptPreview(ctx context.Context, sessionID, userInput str
 			ID: entry.ID, Keys: keys, Content: entry.Content,
 			Constant: entry.Constant, Priority: entry.Priority, Enabled: entry.Enabled,
 			Group: entry.Group, GroupWeight: entry.GroupWeight,
+			Probability: entry.Probability, Sticky: entry.Sticky,
 		})
 	}
 	var presetIR []prompt_ir.PresetEntry
@@ -1145,6 +1203,10 @@ func (e *GameEngine) Suggest(ctx context.Context, sessionID string) (string, err
 
 	var wbEntries []dbmodels.WorldbookEntry
 	e.db.Where("game_id = ? AND enabled = true", sess.GameID).Find(&wbEntries)
+	if sess.UserID != "" {
+		wbEntries = applyWorldbookOverrides(e.db, sess.GameID, sess.UserID, wbEntries)
+	}
+	wbEntries, _ = applyStickyAndProbability(wbEntries, sess.StickyEntries, newRng())
 
 	var presetEntries []dbmodels.PresetEntry
 	e.db.Where("game_id = ? AND enabled = true", sess.GameID).
@@ -1190,6 +1252,7 @@ func (e *GameEngine) Suggest(ctx context.Context, sessionID string) (string, err
 			ScanDepth: entry.ScanDepth, Position: entry.Position, Depth: entry.Depth,
 			WholeWord: entry.WholeWord, Enabled: entry.Enabled,
 			Group: entry.Group, GroupWeight: entry.GroupWeight,
+			Probability: entry.Probability, Sticky: entry.Sticky,
 		})
 	}
 	var regexRules []prompt_ir.RegexRule

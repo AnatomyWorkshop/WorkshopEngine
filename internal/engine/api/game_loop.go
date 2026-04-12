@@ -152,6 +152,49 @@ func (e *GameEngine) triggerMemoryConsolidation(sessionID string, _ []map[string
 	}
 }
 
+// resolveSlot 按优先级解析 narrator slot 的 LLM 客户端和采样参数。
+// 优先级：DB 绑定（session > global > wildcard）→ env 默认客户端。
+func (e *GameEngine) resolveSlot(sessionID, userID, slot string) (llm.Provider, llm.Options) {
+	if e.registry != nil {
+		if client, opts, ok := e.registry.ResolveForSlot(e.db, userID, sessionID, slot); ok {
+			return client, opts
+		}
+	}
+	opts := llm.Options{MaxTokens: e.maxTokens}
+	return e.llmClient, opts
+}
+
+// applyGenParams 将前端传入的 GenParams 覆盖到 llm.Options。
+func applyGenParams(opts *llm.Options, p *GenParams) {
+	if p == nil {
+		return
+	}
+	if p.MaxTokens != nil {
+		opts.MaxTokens = *p.MaxTokens
+	}
+	if p.Temperature != nil {
+		opts.Temperature = p.Temperature
+	}
+	if p.TopP != nil {
+		opts.TopP = p.TopP
+	}
+	if p.TopK != nil {
+		opts.TopK = p.TopK
+	}
+	if p.FrequencyPenalty != nil {
+		opts.FrequencyPenalty = p.FrequencyPenalty
+	}
+	if p.PresencePenalty != nil {
+		opts.PresencePenalty = p.PresencePenalty
+	}
+	if p.ReasoningEffort != nil {
+		opts.ReasoningEffort = *p.ReasoningEffort
+	}
+	if len(p.Stop) > 0 {
+		opts.Stop = p.Stop
+	}
+}
+
 // PlayTurn 运行一次游戏回合（核心主链路：One-Shot LLM）
 func (e *GameEngine) PlayTurn(ctx context.Context, req TurnRequest) (*TurnResponse, error) {
 	// ── 1. 加载游戏会话与静态配置 ──────────────────────────────
@@ -168,6 +211,11 @@ func (e *GameEngine) PlayTurn(ctx context.Context, req TurnRequest) (*TurnRespon
 	// 读取世界书词条
 	var wbEntries []dbmodels.WorldbookEntry
 	e.db.Where("game_id = ? AND enabled = true", sess.GameID).Find(&wbEntries)
+
+	// 合并玩家世界书覆盖（A-20）：直接查表，不 import platform/library
+	if sess.UserID != "" {
+		wbEntries = applyWorldbookOverrides(e.db, sess.GameID, sess.UserID, wbEntries)
+	}
 
 	// 读取 Preset Entry 条目
 	var presetEntries []dbmodels.PresetEntry
@@ -292,6 +340,9 @@ func (e *GameEngine) PlayTurn(ctx context.Context, req TurnRequest) (*TurnRespon
 	history, _ := e.sessions.GetHistory(req.SessionID, req.BranchID, e.maxHistoryFloors)
 
 	// ── 6. 将世界书条目转换为 Pipeline 所需格式 ────────────────
+	// probability 过滤 + sticky 持续激活（A-22）
+	wbEntries, updatedStickyMap := applyStickyAndProbability(wbEntries, sess.StickyEntries, newRng())
+
 	var wbIR []prompt_ir.WorldbookEntry
 	for _, entry := range wbEntries {
 		var keys []string
@@ -313,7 +364,15 @@ func (e *GameEngine) PlayTurn(ctx context.Context, req TurnRequest) (*TurnRespon
 			Enabled:        entry.Enabled,
 			Group:          entry.Group,
 			GroupWeight:    entry.GroupWeight,
+			Probability:    entry.Probability,
+			Sticky:         entry.Sticky,
 		})
+	}
+
+	// 持久化更新后的 sticky 状态
+	if stickyJSON, err := json.Marshal(updatedStickyMap); err == nil {
+		e.db.Model(&dbmodels.GameSession{}).Where("id = ?", req.SessionID).
+			Update("sticky_entries", stickyJSON)
 	}
 
 	// ── 6b. 将 Regex 规则转换为 IR ──────────────────────────

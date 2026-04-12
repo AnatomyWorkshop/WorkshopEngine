@@ -27,6 +27,8 @@ type GameSession struct {
 	CharacterSnapshot   datatypes.JSON `gorm:"type:jsonb;default:'null'"                     json:"character_snapshot"`
 	Generating          bool           `gorm:"default:false"                                 json:"generating"`
 	GenerationMode      string         `gorm:"default:'reject'"                              json:"generation_mode"`
+	// Sticky 词条跟踪（A-22）：map[entry_id]remaining_turns
+	StickyEntries       datatypes.JSON `gorm:"type:jsonb;default:'{}'"                       json:"sticky_entries"`
 	CreatedAt           time.Time      `json:"created_at"`
 	UpdatedAt           time.Time      `json:"updated_at"`
 }

@@ -28,6 +28,9 @@ type WorldbookEntry struct {
 	Enabled        bool     `json:"enabled"`
 	Group          string   `json:"group"`        // 互斥分组名（空 = 不参与分组裁剪）
 	GroupWeight    float64  `json:"group_weight"` // 同组内优先级（降序，最高权重的词条被保留）
+	// ST 表现力字段（A-22）
+	Probability    int      `json:"probability"`  // 触发概率 0-100（100=必触发，0=永不触发）
+	Sticky         int      `json:"sticky"`       // 触发后保持激活 N 轮（0=不保持）
 }
 
 // AtDepthBlock 代表一条需要嵌入对话历史特定深度的世界书词条。

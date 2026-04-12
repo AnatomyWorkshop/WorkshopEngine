@@ -24,29 +24,53 @@ import (
 )
 
 // GameSeedFile 对应 .data/games/*/game.json 的结构
+// 支持两种格式：
+//   1. 扁平格式：slug/title/config 等在顶层
+//   2. 导出格式：template 对象 + worldbook_entries 数组
 type GameSeedFile struct {
-	Slug        string            `json:"slug"`
-	Title       string            `json:"title"`
-	Type        string            `json:"type"`
-	ShortDesc   string            `json:"short_desc"`
-	Notes       string            `json:"notes"`
-	CoverURL    string            `json:"cover_url"`
-	Status      string            `json:"status"`
-	Config      map[string]any    `json:"config"`
-	SystemPrompt string           `json:"system_prompt"`
-	WorldbookEntries []WBSeed     `json:"worldbook_entries"`
-	PresetEntries    []PESeed     `json:"preset_entries"`
+	// 扁平格式字段
+	Slug         string         `json:"slug"`
+	Title        string         `json:"title"`
+	Type         string         `json:"type"`
+	ShortDesc    string         `json:"short_desc"`
+	Notes        string         `json:"notes"`
+	CoverURL     string         `json:"cover_url"`
+	Status       string         `json:"status"`
+	Config       map[string]any `json:"config"`
+	SystemPrompt string         `json:"system_prompt"`
+	// 导出格式字段
+	Template *TemplateSeed `json:"template"`
+	// 共享
+	WorldbookEntries []WBSeed `json:"worldbook_entries"`
+	PresetEntries    []PESeed `json:"preset_entries"`
+}
+
+// TemplateSeed 导出格式中的 template 对象
+type TemplateSeed struct {
+	Slug                 string         `json:"slug"`
+	Title                string         `json:"title"`
+	Type                 string         `json:"type"`
+	ShortDesc            string         `json:"short_desc"`
+	Description          string         `json:"description"`
+	Notes                string         `json:"notes"`
+	CoverURL             string         `json:"cover_url"`
+	Status               string         `json:"status"`
+	AuthorID             string         `json:"author_id"`
+	Config               map[string]any `json:"config"`
+	SystemPromptTemplate string         `json:"system_prompt_template"`
 }
 
 type WBSeed struct {
-	Keys           []string `json:"keys"`
-	SecondaryKeys  []string `json:"secondary_keys"`
-	Content        string   `json:"content"`
-	Constant       bool     `json:"constant"`
-	Position       string   `json:"position"`
-	Priority       int      `json:"priority"`
-	ScanDepth      int      `json:"scan_depth"`
-	Comment        string   `json:"comment"`
+	Keys            []string `json:"keys"`
+	SecondaryKeys   []string `json:"secondary_keys"`
+	Content         string   `json:"content"`
+	Constant        bool     `json:"constant"`
+	Position        string   `json:"position"`
+	Priority        int      `json:"priority"`
+	ScanDepth       int      `json:"scan_depth"`
+	Comment         string   `json:"comment"`
+	PlayerVisible   *bool    `json:"player_visible"`   // nil = default true
+	DisplayCategory string   `json:"display_category"`
 }
 
 type PESeed struct {
@@ -62,12 +86,12 @@ type PESeed struct {
 }
 
 func main() {
-	dataDir := flag.String("data", "../../.data/games", "path to .data/games directory")
+	dataDir := flag.String("data", "../.data/games", "path to .data/games directory")
 	force := flag.Bool("force", false, "delete and re-import existing games")
 	flag.Parse()
 
 	_ = godotenv.Load(".env")
-	_ = godotenv.Load("../../.env")
+	_ = godotenv.Load("../.env")
 
 	dsn := os.Getenv("DATABASE_URL")
 	if dsn == "" {
@@ -103,6 +127,20 @@ func importGame(db *gorm.DB, path string, force bool) error {
 	var seed GameSeedFile
 	if err := json.Unmarshal(data, &seed); err != nil {
 		return fmt.Errorf("parse %s: %w", path, err)
+	}
+
+	// 兼容导出格式：从 template 对象提升字段到顶层
+	if seed.Template != nil {
+		t := seed.Template
+		if seed.Slug == "" { seed.Slug = t.Slug }
+		if seed.Title == "" { seed.Title = t.Title }
+		if seed.Type == "" { seed.Type = t.Type }
+		if seed.ShortDesc == "" { seed.ShortDesc = t.ShortDesc }
+		if seed.Notes == "" { seed.Notes = t.Notes }
+		if seed.CoverURL == "" { seed.CoverURL = t.CoverURL }
+		if seed.Status == "" { seed.Status = t.Status }
+		if seed.Config == nil { seed.Config = t.Config }
+		if seed.SystemPrompt == "" { seed.SystemPrompt = t.SystemPromptTemplate }
 	}
 
 	// 检查是否已存在
@@ -160,18 +198,24 @@ func importGame(db *gorm.DB, path string, force bool) error {
 	for _, wb := range seed.WorldbookEntries {
 		keysJSON, _ := json.Marshal(wb.Keys)
 		secKeysJSON, _ := json.Marshal(wb.SecondaryKeys)
+		pv := true
+		if wb.PlayerVisible != nil {
+			pv = *wb.PlayerVisible
+		}
 		entry := dbmodels.WorldbookEntry{
-			GameID:        tmpl.ID,
-			Keys:          keysJSON,
-			SecondaryKeys: secKeysJSON,
-			Content:       wb.Content,
-			Constant:      wb.Constant,
-			Position:      wb.Position,
-			Priority:      wb.Priority,
-			ScanDepth:     wb.ScanDepth,
-			Comment:       wb.Comment,
-			Enabled:       true,
-			CreatedAt:     time.Now(),
+			GameID:          tmpl.ID,
+			Keys:            keysJSON,
+			SecondaryKeys:   secKeysJSON,
+			Content:         wb.Content,
+			Constant:        wb.Constant,
+			Position:        wb.Position,
+			Priority:        wb.Priority,
+			ScanDepth:       wb.ScanDepth,
+			Comment:         wb.Comment,
+			PlayerVisible:   pv,
+			DisplayCategory: wb.DisplayCategory,
+			Enabled:         true,
+			CreatedAt:       time.Now(),
 		}
 		if entry.Position == "" {
 			entry.Position = "before_template"

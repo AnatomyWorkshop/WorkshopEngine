@@ -42,7 +42,13 @@ type WorldbookEntry struct {
 	Enabled        bool           `gorm:"default:true"                                  json:"enabled"`
 	Group          string         `gorm:"default:''"                                    json:"group"`         // 互斥分组名（空 = 不参与分组裁剪）
 	GroupWeight    float64        `gorm:"default:0"                                     json:"group_weight"`  // 同组内优先级（降序，最高权重的词条被保留）
-	Comment        string         `json:"comment"`
+	// ST 表现力字段（A-22）
+	Probability     int    `gorm:"default:100"  json:"probability"`    // 触发概率 0-100（100=必触发）
+	Sticky          int    `gorm:"default:0"    json:"sticky"`         // 触发后保持激活 N 轮（0=不保持）
+	// 玩家可见性与分类（WorldbookDrawer 展示用）
+	PlayerVisible   bool   `gorm:"default:true" json:"player_visible"`  // false = 系统词条，不在 WorldbookDrawer 展示
+	DisplayCategory string `gorm:"default:''"   json:"display_category"` // 分类标签（区域/势力/事件/角色/总纲/系统）
+	Comment         string `json:"comment"`
 	CreatedAt      time.Time      `json:"created_at"`
 }
 

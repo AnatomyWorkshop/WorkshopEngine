@@ -24,7 +24,7 @@ func RegisterCreationRoutes(rg *gin.RouterGroup, db *gorm.DB, masterKey string) 
 
 	// ── 角色卡接口 ────────────────────────────────────────────
 
-	// POST /api/create/cards/import — 导入角色卡 PNG
+	// POST /api/create/cards/import — 导入角色卡 PNG（CCv2/CCv3）或 GW 游戏包 PNG（gw_game）
 	create.POST("/cards/import", func(c *gin.Context) {
 		file, err := c.FormFile("file")
 		if err != nil {
@@ -38,7 +38,43 @@ func RegisterCreationRoutes(rg *gin.RouterGroup, db *gorm.DB, masterKey string) 
 		}
 		defer f.Close()
 
-		parsed, err := card.ParsePNG(f)
+		// 先尝试 gw_game keyword
+		gwJSON, gwErr := card.ParseGWGamePNG(f)
+		if gwErr == nil {
+			// gw_game 包：复用 templates/import 逻辑
+			var pkg struct {
+				Version          string                     `json:"version"`
+				Template         dbmodels.GameTemplate      `json:"template"`
+				PresetEntries    []dbmodels.PresetEntry     `json:"preset_entries"`
+				WorldbookEntries []dbmodels.WorldbookEntry  `json:"worldbook_entries"`
+				RegexProfiles    []dbmodels.RegexProfile    `json:"regex_profiles"`
+				RegexRules       []dbmodels.RegexRule       `json:"regex_rules"`
+				Materials        []dbmodels.Material        `json:"materials"`
+				PresetTools      []dbmodels.PresetTool      `json:"preset_tools"`
+			}
+			if err := json.Unmarshal(gwJSON, &pkg); err != nil {
+				c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "invalid gw_game JSON: " + err.Error()})
+				return
+			}
+			if err := importGamePackage(db, &pkg.Template, pkg.PresetEntries, pkg.WorldbookEntries, pkg.RegexProfiles, pkg.RegexRules, pkg.Materials, pkg.PresetTools); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+			c.JSON(http.StatusOK, gin.H{"code": 0, "data": gin.H{
+				"type":        "gw_game",
+				"template_id": pkg.Template.ID,
+				"slug":        pkg.Template.Slug,
+				"title":       pkg.Template.Title,
+			}})
+			return
+		}
+
+		// 回退到 CCv2/CCv3 角色卡
+		// 需要重新打开文件（f 已被读取）
+		f.Close()
+		f2, _ := file.Open()
+		defer f2.Close()
+		parsed, err := card.ParsePNG(f2)
 		if err != nil {
 			c.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
 			return
@@ -48,12 +84,12 @@ func RegisterCreationRoutes(rg *gin.RouterGroup, db *gorm.DB, masterKey string) 
 		tagsJSON, _ := json.Marshal(parsed.Tags)
 
 		cc := dbmodels.CharacterCard{
-			Slug:      util.Slugify(parsed.Name, "card"),
-			Name:      parsed.Name,
-			Spec:      parsed.Spec,
-			Data:      rawJSON,
-			Tags:      tagsJSON,
-			IsPublic:  true,
+			Slug:     util.Slugify(parsed.Name, "card"),
+			Name:     parsed.Name,
+			Spec:     parsed.Spec,
+			Data:     rawJSON,
+			Tags:     tagsJSON,
+			IsPublic: true,
 		}
 		if err := db.Where("slug = ?", cc.Slug).FirstOrCreate(&cc).Error; err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -77,17 +113,17 @@ func RegisterCreationRoutes(rg *gin.RouterGroup, db *gorm.DB, masterKey string) 
 			}
 		}
 
+		lorebookCount := 0
+		if parsed.CharacterBook != nil {
+			lorebookCount = len(parsed.CharacterBook.Entries)
+		}
 		c.JSON(http.StatusOK, gin.H{"code": 0, "data": gin.H{
-			"id":       cc.ID,
-			"slug":     cc.Slug,
-			"name":     cc.Name,
-			"spec":     cc.Spec,
-			"lorebook_entries": func() int {
-				if parsed.CharacterBook != nil {
-					return len(parsed.CharacterBook.Entries)
-				}
-				return 0
-			}(),
+			"type":             "character_card",
+			"id":               cc.ID,
+			"slug":             cc.Slug,
+			"name":             cc.Name,
+			"spec":             cc.Spec,
+			"lorebook_entries": lorebookCount,
 		}})
 	})
 

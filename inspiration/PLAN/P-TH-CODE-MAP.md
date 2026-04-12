@@ -1,6 +1,6 @@
 # TavernHeadless → WorkshopEngine 代码位置对照
 
-> 版本：2026-04-10（TH Beta3 `bdafb0a` 2026-04-07 + WE Phase 3 全部完成）
+> 版本：2026-04-12（TH `4399619` 2026-04-12 + WE P-4G 完成）
 > TH 根目录：`D:\ai-game-workshop\plagiarism-and-secret\TavernHeadless\`
 > 用途：借鉴 TH 实现细节时直接定位文件
 
@@ -105,8 +105,8 @@
 
 | TH | WE |
 |----|-----|
-| `apps/api/src/services/runtime-job-catalog.ts` | 计划 P-4G |
-| `apps/api/src/services/runtime-worker.ts` | `internal/engine/memory/worker.go`（goroutine） |
+| `apps/api/src/services/runtime-job-catalog.ts` | `internal/engine/scheduler/scheduler.go`（P-4G ✅） |
+| `apps/api/src/services/runtime-worker.ts` | `internal/engine/memory/worker.go`（P-4G ✅ DB 调度） |
 | `apps/api/src/services/runtime-revision-guard.ts`（CAS） | 无对等（明确不做） |
 | `apps/api/drizzle/0024_background_job_runtime.sql` | 计划 P-4G |
 
@@ -124,10 +124,74 @@
 
 | TH | WE |
 |----|-----|
+| `apps/api/src/services/st-macros/runtime.ts` | `internal/engine/macros/expand.go` |
+| `apps/api/src/services/st-macros/types.ts` | 无对等（WE 无结构化 warning/trace） |
+| `apps/api/src/services/st-macros/if-condition.ts` | 无对等（WE 无 `{{if}}` 块） |
+| `apps/api/src/services/st-macros/variable-path.ts` | 无对等（WE 无结构化路径） |
 | `apps/api/src/lib/preset-utils.ts`（基础替换） | `internal/engine/macros/expand.go` |
-| ST MacroEngine 2.0（Chevrotain AST） | 无对等（WE 用正则替换） |
 
-**差异：** TH 宏系统不完整，委托调用方。WE 已实现 `{{char}}/{{user}}/{{persona}}/{{getvar::key}}/{{time}}/{{date}}`，比 TH 后端更完整。P-4K 计划扩展为可注册 Registry + 副作用宏 + 嵌套求值。
+#### 设计对比
+
+**TH 宏系统（ST Macro Compatibility Core Profile）**
+
+TH 在 `runtime.ts` 实现了一个完整的 AST 求值器：
+
+- **解析层**：`parseMacroNodes` 将输入文本解析为节点树（`text` / `raw` / `macro` / `if`），而非直接字符串替换
+- **`{{if}}` 块**：完整支持 `{{if cond}}...{{else}}...{{/if}}`，含短路求值（未命中分支的写宏不执行）
+- **变量读写宏**：`getvar` / `setvar` / `addvar` / `incvar` / `decvar` / `deletevar` 及 global 变体，支持结构化路径（`资产.金币`、`角色['属性'].力量`）
+- **副作用隔离**：写宏不直接落库，而是进入 `variableOverlay`（staged buffer），只有 turn commit 时才真正持久化；dry-run / preview 阶段只记录 `mutationPreview`，无副作用
+- **执行阶段**：`import` 阶段完全禁止求值；`preview` / `dry_run` / `assemble` / `commit_consume` 各有不同的副作用权限
+- **安全限制**：`maxDepth`（16）、`maxSteps`（256）、`maxExpandedLength`（32768）、`maxMutationCount`（128）
+- **结构化输出**：`StMacroEvalResult` 包含 `warnings`（带 code）、`usedMacros`、`mutationPreview`、`stagedMutations`、`traces`，可用于调试和审计
+- **循环检测**：`evaluationStack` 检测重复展开路径，防止无限递归
+
+**WE 宏系统（当前 `expand.go`）**
+
+WE 当前是纯字符串替换：
+
+- `strings.ReplaceAll` 链式替换固定宏（`{{char}}`、`{{user}}`、`{{persona}}`、`{{time}}`、`{{date}}`）
+- `regexp.ReplaceAllStringFunc` 处理 `{{getvar::key}}`（正则匹配，直接查 map）
+- 无 AST、无 `{{if}}` 块、无写宏、无副作用隔离、无 warning/trace 输出
+- 未知宏保留原文（不报错）
+- 展开结果不递归（防止无限循环，但也无法处理宏嵌套）
+
+#### 优劣分析
+
+| 维度 | TH | WE（当前） |
+|------|-----|-----------|
+| 实现复杂度 | 高（~1000 行 TS，4 个文件） | 低（~110 行 Go，1 个文件） |
+| `{{if}}` 条件块 | ✅ 完整支持 | ❌ 不支持 |
+| 变量写宏 | ✅ setvar/addvar/incvar/deletevar | ❌ 不支持 |
+| 副作用隔离 | ✅ staged buffer，commit 才落库 | N/A（无写宏） |
+| 结构化路径 | ✅ 点路径 + 引号 key | ❌ 仅 flat key |
+| 执行阶段控制 | ✅ import/preview/dry_run/assemble/commit | ❌ 无阶段概念 |
+| Warning/Trace | ✅ 结构化，16 种 warning code | ❌ 无 |
+| 安全限制 | ✅ depth/steps/length/mutation 四重限制 | ❌ 无 |
+| 循环检测 | ✅ evaluationStack | ❌ 无（靠"不递归"规避） |
+| 可扩展性 | 中（新宏需改 runtime.ts） | 低（新宏需改 expand.go） |
+| 性能 | 中（AST 解析有开销） | 高（纯字符串操作） |
+
+#### WE 是否需要改思路？
+
+**短期（P-4K 之前）：不需要大改。**
+
+WE 当前宏系统的覆盖范围（`{{char}}`/`{{user}}`/`{{persona}}`/`{{getvar::key}}`/`{{time}}`/`{{date}}`）已经满足现有游戏包的实际需求。TH 的复杂度来自于它需要兼容 ST 的完整宏语法（包括 `{{if}}`、写宏、legacy alias），而 WE 的游戏包是自己设计的，可以选择不依赖这些特性。
+
+**中期（P-4K）：按需扩展，不必全量复制 TH。**
+
+P-4K 计划的"可注册 Registry + 副作用宏 + 嵌套求值"方向是正确的，但实现时可以参考 TH 的以下设计：
+
+1. **副作用隔离**：写宏（如果引入）应该进入 staged buffer，不直接写 DB。TH 的 `variableOverlay` 模式值得借鉴。
+2. **执行阶段**：引入 `MacroPhase`（`assemble` / `dry_run` / `preview`），控制写宏是否执行。
+3. **安全限制**：至少加 `maxDepth` 和 `maxSteps`，防止恶意游戏包触发无限展开。
+4. **`{{if}}` 块**：如果游戏包需要条件文本，可以参考 TH 的 `tryParseIfBlock` 实现，但可以先只支持简单的 truthy 判断，不需要完整的比较运算符。
+
+**不需要复制的部分：**
+
+- TH 的 legacy alias（`<USER>` → `{{user}}`）：WE 游戏包不用 ST 旧语法
+- TH 的 `getglobalvar` / `setglobalvar` 区分：WE 变量系统已有 scope 层级，宏层不需要再区分
+- TH 的结构化路径（`资产.金币`）：WE 推荐扁平前缀，宏层直接 flat key 查找即可
+- TH 的完整 warning/trace 系统：WE 可以简化，只在 dry-run 时输出调试信息
 
 ---
 

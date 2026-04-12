@@ -247,15 +247,15 @@ func registerImportExportRoutes(rg *gin.RouterGroup, db *gorm.DB) {
 	// 解包导入游戏（重建所有关联数据，新建 game_id 避免冲突）
 	rg.POST("/templates/import", func(c *gin.Context) {
 		var pkg struct {
-			Version          string                     `json:"version"`
-			Template         dbmodels.GameTemplate      `json:"template"`
-			PresetEntries    []dbmodels.PresetEntry     `json:"preset_entries"`
-			WorldbookEntries []dbmodels.WorldbookEntry  `json:"worldbook_entries"`
-			RegexProfiles    []dbmodels.RegexProfile    `json:"regex_profiles"`
-			RegexRules       []dbmodels.RegexRule       `json:"regex_rules"`
-			Materials        []dbmodels.Material        `json:"materials"`
-			PresetTools      []dbmodels.PresetTool      `json:"preset_tools"`
-			Meta             map[string]any             `json:"_meta"`
+			Version          string                    `json:"version"`
+			Template         dbmodels.GameTemplate     `json:"template"`
+			PresetEntries    []dbmodels.PresetEntry    `json:"preset_entries"`
+			WorldbookEntries []dbmodels.WorldbookEntry `json:"worldbook_entries"`
+			RegexProfiles    []dbmodels.RegexProfile   `json:"regex_profiles"`
+			RegexRules       []dbmodels.RegexRule      `json:"regex_rules"`
+			Materials        []dbmodels.Material       `json:"materials"`
+			PresetTools      []dbmodels.PresetTool     `json:"preset_tools"`
+			Meta             map[string]any            `json:"_meta"`
 		}
 		if err := c.ShouldBindJSON(&pkg); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -277,92 +277,7 @@ func registerImportExportRoutes(rg *gin.RouterGroup, db *gorm.DB) {
 			}
 		}
 
-		err := db.Transaction(func(tx *gorm.DB) error {
-			// 新建模板（清空 ID，生成新 UUID）
-			pkg.Template.ID = ""
-			// 若 slug 冲突则加后缀
-			slug := pkg.Template.Slug
-			var count int64
-			tx.Model(&dbmodels.GameTemplate{}).Where("slug = ?", slug).Count(&count)
-			if count > 0 {
-				pkg.Template.Slug = slug + "-imported-" + strings.ReplaceAll(time.Now().Format("20060102150405"), "", "")
-			}
-			pkg.Template.Status = "draft"
-			if err := tx.Create(&pkg.Template).Error; err != nil {
-				return err
-			}
-			newGameID := pkg.Template.ID
-
-			// 重建 PresetEntry（新 game_id，清空 ID）
-			for i := range pkg.PresetEntries {
-				pkg.PresetEntries[i].ID = ""
-				pkg.PresetEntries[i].GameID = newGameID
-			}
-			if len(pkg.PresetEntries) > 0 {
-				if err := tx.Create(&pkg.PresetEntries).Error; err != nil {
-					return err
-				}
-			}
-
-			// 重建 WorldbookEntry
-			for i := range pkg.WorldbookEntries {
-				pkg.WorldbookEntries[i].ID = ""
-				pkg.WorldbookEntries[i].GameID = newGameID
-			}
-			if len(pkg.WorldbookEntries) > 0 {
-				if err := tx.Create(&pkg.WorldbookEntries).Error; err != nil {
-					return err
-				}
-			}
-
-			// 重建 RegexProfile + RegexRule（需要维护 profile_id 映射）
-			profileIDMap := map[string]string{}
-			for i := range pkg.RegexProfiles {
-				oldID := pkg.RegexProfiles[i].ID
-				pkg.RegexProfiles[i].ID = ""
-				pkg.RegexProfiles[i].GameID = newGameID
-				if err := tx.Create(&pkg.RegexProfiles[i]).Error; err != nil {
-					return err
-				}
-				profileIDMap[oldID] = pkg.RegexProfiles[i].ID
-			}
-			for i := range pkg.RegexRules {
-				pkg.RegexRules[i].ID = ""
-				if newPID, ok := profileIDMap[pkg.RegexRules[i].ProfileID]; ok {
-					pkg.RegexRules[i].ProfileID = newPID
-				}
-			}
-			if len(pkg.RegexRules) > 0 {
-				if err := tx.Create(&pkg.RegexRules).Error; err != nil {
-					return err
-				}
-			}
-
-			// 重建 Material
-			for i := range pkg.Materials {
-				pkg.Materials[i].ID = ""
-				pkg.Materials[i].GameID = newGameID
-			}
-			if len(pkg.Materials) > 0 {
-				if err := tx.Create(&pkg.Materials).Error; err != nil {
-					return err
-				}
-			}
-
-			// 重建 PresetTool
-			for i := range pkg.PresetTools {
-				pkg.PresetTools[i].ID = ""
-				pkg.PresetTools[i].GameID = newGameID
-			}
-			if len(pkg.PresetTools) > 0 {
-				if err := tx.Create(&pkg.PresetTools).Error; err != nil {
-					return err
-				}
-			}
-
-			return nil
-		})
-		if err != nil {
+		if err := importGamePackage(db, &pkg.Template, pkg.PresetEntries, pkg.WorldbookEntries, pkg.RegexProfiles, pkg.RegexRules, pkg.Materials, pkg.PresetTools); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
@@ -370,5 +285,97 @@ func registerImportExportRoutes(rg *gin.RouterGroup, db *gorm.DB) {
 			"template_id": pkg.Template.ID,
 			"slug":        pkg.Template.Slug,
 		}})
+	})
+}
+
+// importGamePackage 在事务中重建游戏包（新 game_id，避免冲突）。
+// tmpl.ID 和 tmpl.Slug 会被就地修改为新值。
+func importGamePackage(
+	db *gorm.DB,
+	tmpl *dbmodels.GameTemplate,
+	presetEntries []dbmodels.PresetEntry,
+	worldbookEntries []dbmodels.WorldbookEntry,
+	regexProfiles []dbmodels.RegexProfile,
+	regexRules []dbmodels.RegexRule,
+	materials []dbmodels.Material,
+	presetTools []dbmodels.PresetTool,
+) error {
+	return db.Transaction(func(tx *gorm.DB) error {
+		tmpl.ID = ""
+		slug := tmpl.Slug
+		var count int64
+		tx.Model(&dbmodels.GameTemplate{}).Where("slug = ?", slug).Count(&count)
+		if count > 0 {
+			tmpl.Slug = slug + "-imported-" + strings.ReplaceAll(time.Now().Format("20060102150405"), "", "")
+		}
+		tmpl.Status = "draft"
+		if err := tx.Create(tmpl).Error; err != nil {
+			return err
+		}
+		newGameID := tmpl.ID
+
+		for i := range presetEntries {
+			presetEntries[i].ID = ""
+			presetEntries[i].GameID = newGameID
+		}
+		if len(presetEntries) > 0 {
+			if err := tx.Create(&presetEntries).Error; err != nil {
+				return err
+			}
+		}
+
+		for i := range worldbookEntries {
+			worldbookEntries[i].ID = ""
+			worldbookEntries[i].GameID = newGameID
+		}
+		if len(worldbookEntries) > 0 {
+			if err := tx.Create(&worldbookEntries).Error; err != nil {
+				return err
+			}
+		}
+
+		profileIDMap := map[string]string{}
+		for i := range regexProfiles {
+			oldID := regexProfiles[i].ID
+			regexProfiles[i].ID = ""
+			regexProfiles[i].GameID = newGameID
+			if err := tx.Create(&regexProfiles[i]).Error; err != nil {
+				return err
+			}
+			profileIDMap[oldID] = regexProfiles[i].ID
+		}
+		for i := range regexRules {
+			regexRules[i].ID = ""
+			if newPID, ok := profileIDMap[regexRules[i].ProfileID]; ok {
+				regexRules[i].ProfileID = newPID
+			}
+		}
+		if len(regexRules) > 0 {
+			if err := tx.Create(&regexRules).Error; err != nil {
+				return err
+			}
+		}
+
+		for i := range materials {
+			materials[i].ID = ""
+			materials[i].GameID = newGameID
+		}
+		if len(materials) > 0 {
+			if err := tx.Create(&materials).Error; err != nil {
+				return err
+			}
+		}
+
+		for i := range presetTools {
+			presetTools[i].ID = ""
+			presetTools[i].GameID = newGameID
+		}
+		if len(presetTools) > 0 {
+			if err := tx.Create(&presetTools).Error; err != nil {
+				return err
+			}
+		}
+
+		return nil
 	})
 }

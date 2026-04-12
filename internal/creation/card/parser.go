@@ -42,6 +42,31 @@ type LorebookEntry struct {
 	Comment  string   `json:"comment"`
 }
 
+// ParseGWGamePNG 从 PNG 的 tEXt chunk（keyword = "gw_game"）提取 GW 游戏包 JSON。
+// 返回原始 JSON 字节，调用方负责反序列化为具体结构。
+func ParseGWGamePNG(r io.Reader) ([]byte, error) {
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return nil, fmt.Errorf("read png: %w", err)
+	}
+	if len(data) < 8 || !bytes.Equal(data[:8], []byte{137, 80, 78, 71, 13, 10, 26, 10}) {
+		return nil, fmt.Errorf("not a valid PNG file")
+	}
+	chunks := extractPNGTextChunks(data[8:])
+	raw, ok := chunks["gw_game"]
+	if !ok {
+		return nil, fmt.Errorf("no gw_game chunk found")
+	}
+	decoded, err := base64.StdEncoding.DecodeString(string(raw))
+	if err != nil {
+		decoded, err = base64.URLEncoding.DecodeString(string(raw))
+		if err != nil {
+			return nil, fmt.Errorf("base64 decode: %w", err)
+		}
+	}
+	return decoded, nil
+}
+
 // ParsePNG 从 PNG 文件流中解析 SillyTavern 角色卡数据
 // 支持 tEXt chunk 中的 "chara"（CCv2）和 "ccv3"（CCv3）键
 func ParsePNG(r io.Reader) (*CharacterCardData, error) {
